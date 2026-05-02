@@ -49,6 +49,30 @@ wget -O - http://<server_ip>:8080/init/<token>.sh | sudo sh
   **Linux:** установка через apt-get и systemd, интерфейс `phobos`, VPN как запасной интерфейс (`Table = off`). При обнаружении 3x-ui — только obfuscator через 3xui.sh.
 </details>
 
+### Какие порты открыть на VPS
+
+После установки Phobos использует два внешних порта:
+
+```text
+<HTTP_PORT>/tcp        - выдача клиентского установщика, например http://89.125.122.115:3485/init/<token>.sh
+<OBFUSCATOR_PORT>/udp  - рабочий порт VPN-туннеля через wg-obfuscator
+```
+
+Пример команды клиента:
+
+```bash
+wget -qO- http://89.125.122.115:3485/init/deb790bbace89dbc20cf1d03be3aa5c1.sh | sh
+```
+
+Для такого примера на VPS или в панели хостинга нужно открыть минимум:
+
+```bash
+ufw allow 3485/tcp
+ufw allow <OBFUSCATOR_PORT>/udp
+```
+
+Точный `OBFUSCATOR_PORT` показывает меню Phobos и команда выдачи ссылки клиенту. Порт WireGuard `51820/udp` наружу обычно открывать не нужно: он используется локально, а внешний трафик принимает `wg-obfuscator`.
+
 ## Управление системой
 
 ### Интерактивное меню на VPS

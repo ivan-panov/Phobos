@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CLIENT_SCRIPT="$SCRIPT_DIR/phobos-client.sh"
 SYSTEM_SCRIPT="$SCRIPT_DIR/phobos-system.sh"
 CONFIG_SCRIPT="$SCRIPT_DIR/vps-obfuscator-config.sh"
+source "$SCRIPT_DIR/lib-core.sh"
+load_env
+set +e
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "Требуются root привилегии. Запустите: sudo phobos"
@@ -197,6 +200,7 @@ show_system_menu() {
     echo "  1) Health Check"
     echo "  2) Очистка (токены, мусор)"
     echo "  3) Показать конфиг (env)"
+    echo "  4) Показать порты для firewall"
     echo ""
     echo "  0) Назад"
     read -p "Выбор: " choice
@@ -205,6 +209,7 @@ show_system_menu() {
       1) "$SYSTEM_SCRIPT" status; read -p "Enter..." ;;
       2) "$SYSTEM_SCRIPT" cleanup; read -p "Enter..." ;;
       3) cat "$PHOBOS_DIR/server/server.env"; echo ""; read -p "Enter..." ;;
+      4) print_required_ports; read -p "Enter..." ;;
       0) break ;;
     esac
   done

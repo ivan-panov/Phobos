@@ -3,10 +3,23 @@ OBF_CONF_NAME="wg-obfuscator.conf"
 OBF_INIT_NAME="S49wg-obfuscator"
 OBF_SERVICE_NAME="phobos-obfuscator"
 OBF_WG_IFACE="phobos"
+WG_CONF_NAME="${CLIENT_NAME}.conf"
+
+get_obf_target_from_file() {
+  local file="$1"
+  grep '^target[[:space:]]*=' "$file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' \t\n\r'
+}
+
+get_wg_server_key_from_file() {
+  local file="$1"
+  grep '^PublicKey[[:space:]]*=' "$file" 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d ' \t\n\r'
+}
 
 resolve_install_names() {
   local binary_dir
   local binary_path
+
+  WG_CONF_NAME="${CLIENT_NAME}.conf"
 
   if [ "$ROUTER_PLATFORM" = "openwrt" ]; then
     binary_dir="/usr/bin"
@@ -18,16 +31,53 @@ resolve_install_names() {
 
   binary_path="${binary_dir}/wg-obfuscator"
 
+  local incoming_target incoming_server_key
+  incoming_target=$(get_obf_target_from_file "wg-obfuscator.conf")
+  incoming_server_key=$(get_wg_server_key_from_file "${CLIENT_NAME}.conf")
+
+  # Повторная установка того же самого профиля должна обновлять существующий
+  # инстанс, а не плодить дубликаты. Профиль считаем тем же самым, если совпали
+  # target obfuscator и WireGuard PublicKey сервера.
+  local existing_conf existing_target link_name linked_client_conf linked_server_key base_name idx_suffix
+  for existing_conf in "$PHOBOS_DIR"/wg-obfuscator*.conf; do
+    [ -f "$existing_conf" ] || continue
+    existing_target=$(get_obf_target_from_file "$existing_conf")
+    base_name=$(basename "$existing_conf")
+    link_name="$PHOBOS_DIR/${base_name%.conf}.link"
+    linked_client_conf=""
+    if [ -f "$link_name" ]; then
+      linked_client_conf=$(cat "$link_name" 2>/dev/null)
+    fi
+    [ -n "$linked_client_conf" ] || linked_client_conf="${CLIENT_NAME}.conf"
+    linked_server_key=$(get_wg_server_key_from_file "$PHOBOS_DIR/$linked_client_conf")
+
+    if [ -n "$incoming_target" ] && [ "$incoming_target" = "$existing_target" ] &&        [ -n "$incoming_server_key" ] && [ "$incoming_server_key" = "$linked_server_key" ]; then
+      idx_suffix="${base_name#wg-obfuscator}"
+      idx_suffix="${idx_suffix%.conf}"
+      OBF_BINARY_NAME="wg-obfuscator${idx_suffix}"
+      OBF_CONF_NAME="wg-obfuscator${idx_suffix}.conf"
+      WG_CONF_NAME="$linked_client_conf"
+      if [ -z "$idx_suffix" ]; then
+        OBF_INIT_NAME="S49wg-obfuscator"
+        OBF_SERVICE_NAME="phobos-obfuscator"
+        OBF_WG_IFACE="phobos"
+      else
+        OBF_INIT_NAME="S$((49 + idx_suffix))wg-obfuscator"
+        OBF_SERVICE_NAME="phobos-obfuscator${idx_suffix}"
+        OBF_WG_IFACE="phobos${idx_suffix}"
+      fi
+      log "Найден существующий Phobos-профиль, будет обновлен: ${OBF_CONF_NAME}"
+      return
+    fi
+  done
+
   if [ ! -f "$binary_path" ] && [ ! -f "$PHOBOS_DIR/wg-obfuscator.conf" ]; then
     return
   fi
 
-  if [ -f "$binary_path" ] && [ -f "$PHOBOS_DIR/${CLIENT_NAME}.conf" ]; then
-    return
-  fi
-
+  # На роутере уже есть другой Phobos-профиль: создаем независимый инстанс.
   local idx=1
-  while [ -f "${binary_dir}/wg-obfuscator${idx}" ]; do
+  while [ -f "${binary_dir}/wg-obfuscator${idx}" ] || [ -f "$PHOBOS_DIR/wg-obfuscator${idx}.conf" ]; do
     idx=$((idx + 1))
   done
 
@@ -41,6 +91,7 @@ resolve_install_names() {
   OBF_INIT_NAME="S${init_num}wg-obfuscator"
   OBF_SERVICE_NAME="phobos-obfuscator${idx}"
   OBF_WG_IFACE="phobos${idx}"
+  WG_CONF_NAME="${CLIENT_NAME}-${idx}.conf"
 }
 
 install_obfuscator() {

@@ -283,6 +283,8 @@ step_final() {
   log_info "Установка меню..."
   ln -sf "$REPO_DIR/server/scripts/phobos-menu.sh" /usr/local/bin/phobos
 
+  print_required_ports
+
   log_success "Установка завершена! Запустите 'phobos' для управления системой."
 }
 

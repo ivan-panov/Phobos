@@ -328,12 +328,17 @@ chmod +x install-router.sh
 EOF
 
   local cmd="curl -s http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/init/$token.sh | sh"
+  local wget_cmd="wget -qO- http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/init/$token.sh | sh"
 
   echo ""
   echo "=================================================="
   echo "КОМАНДА ДЛЯ УСТАНОВКИ (Действительна $(($ttl / 3600))ч)"
   echo "=================================================="
   echo "$cmd"
+  echo "или:"
+  echo "$wget_cmd"
+  echo "=================================================="
+  print_required_ports
   echo "=================================================="
   echo ""
 }

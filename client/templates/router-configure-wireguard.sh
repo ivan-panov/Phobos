@@ -23,6 +23,7 @@ check_dependencies() {
 }
 
 CLIENT_NAME=""
+PHOBOS_PROFILE="phobos"
 CLIENT_PRIVATE_KEY=""
 CLIENT_IP=""
 CLIENT_IPV6=""
@@ -47,6 +48,7 @@ Usage: $0 [OPTIONS]
 
 Options:
   --client-name NAME          Client name (required)
+  --interface-name NAME       Phobos profile/interface label (default: phobos)
   --client-private-key KEY    WireGuard private key (required)
   --client-ip IP              Client tunnel IPv4 address (required)
   --client-ipv6 IP            Client tunnel IPv6 address (optional, use none to disable)
@@ -75,6 +77,10 @@ parse_args() {
         case "$1" in
             --client-name)
                 CLIENT_NAME="$2"
+                shift 2
+                ;;
+            --interface-name)
+                PHOBOS_PROFILE="$2"
                 shift 2
                 ;;
             --client-private-key)
@@ -127,10 +133,9 @@ parse_args() {
 }
 
 find_phobos_interface() {
-    local client_name="$1"
-    local target_desc="Phobos-${client_name}"
+    local target_desc="$1"
 
-    log "Поиск существующего интерфейса Phobos для клиента: ${client_name}..." >&2
+    log "Поиск существующего интерфейса Phobos: ${target_desc}..." >&2
 
     local i
     for i in 0 1 2 3 4 5 6 7 8 9; do
@@ -191,7 +196,7 @@ remove_wireguard_interface() {
 configure_wireguard_interface() {
     local interface_name="$1"
 
-    local description="Phobos-${CLIENT_NAME}"
+    local description="Phobos-${CLIENT_NAME}-${PHOBOS_PROFILE}"
     local client_ip_addr=$(echo "${CLIENT_IP}" | cut -d'/' -f1)
     local client_ipv6_block="${CLIENT_IPV6}"
 
@@ -305,8 +310,7 @@ save_configuration() {
 }
 
 verify_interface_created() {
-    local client_name="$1"
-    local interface_description="Phobos-${client_name}"
+    local interface_description="$1"
 
     log "Проверка создания интерфейса WireGuard..."
 
@@ -322,10 +326,10 @@ verify_interface_created() {
         return 1
     fi
 
-    local found=$(echo "$interfaces" | jq -r "to_entries[] | select(.value.description == \"$interface_description\") | .key" 2>/dev/null)
+    local found=$(echo "$interfaces" | jq -r "to_entries[] | select(.value.description == "$interface_description") | .key" 2>/dev/null)
 
     if [ -n "$found" ]; then
-        log "✓ Интерфейс $found (Phobos-${client_name}) успешно создан"
+        log "✓ Интерфейс $found ($interface_description) успешно создан"
         return 0
     else
         error "Интерфейс с description '$interface_description' не найден"
@@ -361,10 +365,13 @@ main() {
     fi
 
     mkdir -p /opt/etc/Phobos
+    PROFILE_DESCRIPTION="Phobos-${CLIENT_NAME}-${PHOBOS_PROFILE}"
+
     log "=== Phobos WireGuard RCI Configuration ==="
     log "Клиент: ${CLIENT_NAME}"
+    log "Профиль: ${PHOBOS_PROFILE}"
 
-    EXISTING_INTERFACE=$(find_phobos_interface "${CLIENT_NAME}") || true
+    EXISTING_INTERFACE=$(find_phobos_interface "${PROFILE_DESCRIPTION}") || true
 
     if [ -n "${EXISTING_INTERFACE}" ]; then
         log "Обнаружен существующий интерфейс: ${EXISTING_INTERFACE}"
@@ -395,7 +402,7 @@ main() {
 
     log "Настройка WireGuard завершена успешно! ✓"
     log "Интерфейс: ${INTERFACE_NAME}"
-    log "Description: Phobos-${CLIENT_NAME}"
+    log "Description: ${PROFILE_DESCRIPTION}"
 
     log ""
     log "Проверка статуса wg-obfuscator..."
@@ -415,7 +422,7 @@ main() {
     log "Ожидание применения конфигурации..."
     sleep 5
 
-    if verify_interface_created "${CLIENT_NAME}"; then
+    if verify_interface_created "${PROFILE_DESCRIPTION}"; then
         log ""
         log "╔════════════════════════════════════════════════════════════╗"
         log "║  WireGuard успешно настроен!                              ║"

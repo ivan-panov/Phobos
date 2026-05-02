@@ -71,6 +71,7 @@ load_env() {
   export OBFUSCATOR_MASKING="${OBFUSCATOR_MASKING:-AUTO}"
   export WG_LOCAL_ENDPOINT="${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}"
   export TOKEN_TTL="${TOKEN_TTL:-86400}"
+  export HTTP_PORT="${HTTP_PORT:-80}"
   export SERVER_PUBLIC_IP_V4="${SERVER_PUBLIC_IP_V4:-0.0.0.0}"
   export SERVER_PUBLIC_IP_V6="${SERVER_PUBLIC_IP_V6:-}"
   export PHOBOS_IPV6_ENABLED="${PHOBOS_IPV6_ENABLED:-0}"
@@ -109,4 +110,21 @@ get_public_ipv4() {
   ip=$(ip -4 addr show dev "$iface" scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d'/' -f1 | head -1)
   [[ -n "$ip" ]] && echo "$ip" && return 0
   return 1
+}
+
+print_required_ports() {
+  local http_port="${HTTP_PORT:-80}"
+  local obf_port="${OBFUSCATOR_PORT:-51821}"
+  local server_ip="${SERVER_PUBLIC_IP_V4:-<server_ip>}"
+
+  echo ""
+  echo "ПОРТЫ, КОТОРЫЕ НУЖНО ОТКРЫТЬ НА VPS/В ПАНЕЛИ ХОСТИНГА:"
+  echo "  ${http_port}/tcp  - HTTP-установщик клиентов: http://${server_ip}:${http_port}/init/<token>.sh"
+  echo "  ${obf_port}/udp  - рабочий порт Phobos obfuscator/WireGuard"
+  echo ""
+  echo "Пример для ufw:"
+  echo "  ufw allow ${http_port}/tcp"
+  echo "  ufw allow ${obf_port}/udp"
+  echo ""
+  echo "Важно: 51820/udp наружу обычно открывать не нужно, он слушает локально через wg-obfuscator."
 }
