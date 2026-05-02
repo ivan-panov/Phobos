@@ -112,6 +112,93 @@ show_apt_tail() {
   fi
 }
 
+
+wait_for_apt_locks() {
+  local waited=0
+  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
+  while true; do
+    local busy=0
+    local lock
+    for lock in "${locks[@]}"; do
+      if fuser "$lock" >/dev/null 2>&1; then
+        busy=1
+        break
+      fi
+    done
+    [[ "$busy" -eq 0 ]] && return 0
+    if (( waited >= 300 )); then
+      log_warn "apt/dpkg lock занят больше 5 минут. Продолжаю попытку, apt сам вернет ошибку если lock не освободился."
+      return 0
+    fi
+    log_warn "Жду apt/dpkg lock... ${waited}s"
+    sleep 5
+    waited=$((waited + 5))
+  done
+}
+
+_collect_child_pids() {
+  local parent="$1"
+  local child
+  pgrep -P "$parent" 2>/dev/null | while read -r child; do
+    [[ -z "$child" ]] && continue
+    echo "$child"
+    _collect_child_pids "$child"
+  done
+}
+
+run_apt_logged() {
+  local max_seconds="$1"
+  local log_file="$2"
+  local label="$3"
+  shift 3
+
+  : > "$log_file"
+  log_info "apt log: $log_file"
+  "$@" >>"$log_file" 2>&1 &
+  local pid=$!
+  local started
+  started=$(date +%s)
+  local last_line=""
+  local last_report=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local now elapsed p stat current_line
+    now=$(date +%s)
+    elapsed=$((now - started))
+
+    for p in $pid $(_collect_child_pids "$pid"); do
+      stat=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ' || true)
+      if [[ "$stat" == T* ]]; then
+        log_warn "$label: процесс $p был остановлен (STAT=T), возобновляю kill -CONT."
+        kill -CONT "$p" 2>/dev/null || true
+      fi
+    done
+
+    if (( elapsed > max_seconds )); then
+      log_error "$label: таймаут ${max_seconds}s. Останавливаю процесс."
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 3
+      kill -KILL "$pid" 2>/dev/null || true
+      show_apt_tail "$log_file"
+      return 124
+    fi
+
+    if (( now - last_report >= 5 )); then
+      current_line=$(grep -v '^$' "$log_file" | tail -n 1 || true)
+      if [[ -n "$current_line" && "$current_line" != "$last_line" ]]; then
+        log_info "apt: $current_line"
+        last_line="$current_line"
+      else
+        log_info "apt: $label... ${elapsed}s"
+      fi
+      last_report=$now
+    fi
+    sleep 1
+  done
+
+  wait "$pid"
+}
+
 step_deps() {
   log_info "Установка зависимостей..."
 
@@ -122,17 +209,19 @@ step_deps() {
   export NEEDRESTART_MODE=a
   export APT_LISTCHANGES_FRONTEND=none
 
-  log_info "apt log: $apt_log"
-
-  if ! timeout 600 apt-get -o Acquire::ForceIPv4=true update -qq >>"$apt_log" 2>&1; then
+  wait_for_apt_locks
+  if ! run_apt_logged 600 "$apt_log" "apt-get update" \
+      apt-get -o Acquire::ForceIPv4=true update -q; then
     show_apt_tail "$apt_log"
-    die "apt-get update не завершился. Проверьте интернет, DNS, apt lock или IPv6/IPv4 маршрутизацию."
+    die "apt-get update не завершился. Проверьте интернет, DNS, apt lock или IPv4 маршрутизацию."
   fi
 
-  if ! timeout 900 apt-get -o Acquire::ForceIPv4=true install -y -qq \
+  wait_for_apt_locks
+  if ! run_apt_logged 900 "$apt_log" "apt-get install dependencies" \
+      apt-get -o Acquire::ForceIPv4=true install -y -q \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
-      wireguard jq curl build-essential ufw >>"$apt_log" 2>&1; then
+      wireguard jq curl build-essential ufw; then
     show_apt_tail "$apt_log"
     die "Не удалось установить зависимости. Подробности выше и в $apt_log"
   fi

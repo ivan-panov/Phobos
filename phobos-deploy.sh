@@ -16,6 +16,91 @@ log_message() {
     echo -e "${GREEN}$1${NC}"
 }
 
+wait_for_apt_locks() {
+    local waited=0
+    local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
+    while true; do
+        local busy=0
+        for lock in "${locks[@]}"; do
+            if fuser "$lock" >/dev/null 2>&1; then
+                busy=1
+                break
+            fi
+        done
+        [[ "$busy" -eq 0 ]] && return 0
+        if (( waited >= 300 )); then
+            echo -e "${YELLOW}apt/dpkg lock занят больше 5 минут. Продолжаю попытку, apt сам вернет ошибку если lock не освободился.${NC}" >&2
+            return 0
+        fi
+        echo -e "${YELLOW}Жду apt/dpkg lock... ${waited}s${NC}" >&2
+        sleep 5
+        waited=$((waited + 5))
+    done
+}
+
+_collect_child_pids() {
+    local parent="$1"
+    local child
+    pgrep -P "$parent" 2>/dev/null | while read -r child; do
+        [[ -z "$child" ]] && continue
+        echo "$child"
+        _collect_child_pids "$child"
+    done
+}
+
+run_logged_command() {
+    local max_seconds="$1"
+    local log_file="$2"
+    local label="$3"
+    shift 3
+
+    : > "$log_file"
+    echo "Лог: $log_file"
+    "$@" >>"$log_file" 2>&1 &
+    local pid=$!
+    local started
+    started=$(date +%s)
+    local last_line=""
+    local last_report=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local now elapsed p stat current_line
+        now=$(date +%s)
+        elapsed=$((now - started))
+
+        for p in $pid $(_collect_child_pids "$pid"); do
+            stat=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ' || true)
+            if [[ "$stat" == T* ]]; then
+                echo -e "\n${YELLOW}${label}: процесс $p был остановлен (STAT=T), возобновляю kill -CONT.${NC}" >&2
+                kill -CONT "$p" 2>/dev/null || true
+            fi
+        done
+
+        if (( elapsed > max_seconds )); then
+            echo -e "\n${RED}${label}: таймаут ${max_seconds}s. Останавливаю процесс.${NC}" >&2
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 3
+            kill -KILL "$pid" 2>/dev/null || true
+            tail -n 60 "$log_file" >&2 || true
+            return 124
+        fi
+
+        if (( now - last_report >= 5 )); then
+            current_line=$(grep -v '^$' "$log_file" | tail -n 1 || true)
+            if [[ -n "$current_line" && "$current_line" != "$last_line" ]]; then
+                echo "[apt] $current_line"
+                last_line="$current_line"
+            else
+                echo "[apt] ${label}... ${elapsed}s"
+            fi
+            last_report=$now
+        fi
+        sleep 1
+    done
+
+    wait "$pid"
+}
+
 trap 'error_exit "Неожиданная ошибка в строке $LINENO"' ERR
 
 check_root() {
@@ -30,13 +115,15 @@ install_git() {
         if [ -f /etc/debian_version ]; then
             export DEBIAN_FRONTEND=noninteractive
             export NEEDRESTART_MODE=a
+            export APT_LISTCHANGES_FRONTEND=none
             APT_LOG="/tmp/phobos-deploy-apt.log"
-            : > "$APT_LOG"
-            timeout 600 apt-get -o Acquire::ForceIPv4=true update -q >>"$APT_LOG" 2>&1 || {
+            wait_for_apt_locks
+            run_logged_command 600 "$APT_LOG" "apt-get update"                 apt-get -o Acquire::ForceIPv4=true update -q || {
                 tail -n 40 "$APT_LOG" >&2 || true
                 error_exit "Не удалось обновить список пакетов. Лог: $APT_LOG"
             }
-            timeout 600 apt-get -o Acquire::ForceIPv4=true install -y -q git >>"$APT_LOG" 2>&1 || {
+            wait_for_apt_locks
+            run_logged_command 600 "$APT_LOG" "apt-get install git"                 apt-get -o Acquire::ForceIPv4=true install -y -q git || {
                 tail -n 40 "$APT_LOG" >&2 || true
                 error_exit "Не удалось установить git. Лог: $APT_LOG"
             }
