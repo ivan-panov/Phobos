@@ -54,14 +54,14 @@ wget -O - http://<server_ip>:8080/init/<token>.sh | sudo sh
 После установки Phobos использует два внешних порта:
 
 ```text
-<HTTP_PORT>/tcp        - выдача клиентского установщика, например http://89.125.122.115:3485/init/<token>.sh
+<HTTP_PORT>/tcp        - выдача клиентского установщика, например http://89.xxx.xxx.xxx:3485/init/<token>.sh
 <OBFUSCATOR_PORT>/udp  - рабочий порт VPN-туннеля через wg-obfuscator
 ```
 
 Пример команды клиента:
 
 ```bash
-wget -qO- http://89.125.122.115:3485/init/deb790bbace89dbc20cf1d03be3aa5c1.sh | sh
+wget -qO- http://89.xxx.xxx.xxx:3485/init/deb790bbaxxxxxxxxxxx.sh | sh
 ```
 
 Для такого примера на VPS или в панели хостинга нужно открыть минимум:
