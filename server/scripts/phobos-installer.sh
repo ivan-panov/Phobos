@@ -103,11 +103,40 @@ spin() {
   printf "\r"
 }
 
+show_apt_tail() {
+  local log_file="$1"
+  if [[ -f "$log_file" ]]; then
+    echo "" >&2
+    log_error "Последние строки apt-лога ($log_file):"
+    tail -n 40 "$log_file" >&2 || true
+  fi
+}
+
 step_deps() {
   log_info "Установка зависимостей..."
-  (apt-get update -qq && apt-get install -y -qq wireguard jq curl build-essential ufw) >/dev/null 2>&1 &
-  spin $! "Установка пакетов..."
-  wait $!
+
+  local apt_log="/tmp/phobos-install-apt.log"
+  : > "$apt_log"
+
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  export APT_LISTCHANGES_FRONTEND=none
+
+  log_info "apt log: $apt_log"
+
+  if ! timeout 600 apt-get -o Acquire::ForceIPv4=true update -qq >>"$apt_log" 2>&1; then
+    show_apt_tail "$apt_log"
+    die "apt-get update не завершился. Проверьте интернет, DNS, apt lock или IPv6/IPv4 маршрутизацию."
+  fi
+
+  if ! timeout 900 apt-get -o Acquire::ForceIPv4=true install -y -qq \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      wireguard jq curl build-essential ufw >>"$apt_log" 2>&1; then
+    show_apt_tail "$apt_log"
+    die "Не удалось установить зависимости. Подробности выше и в $apt_log"
+  fi
+
   log_success "Зависимости установлены."
 }
 

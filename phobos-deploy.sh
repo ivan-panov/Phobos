@@ -28,8 +28,18 @@ install_git() {
     if ! command -v git &> /dev/null; then
         log_message "Git не найден. Установка..."
         if [ -f /etc/debian_version ]; then
-            apt-get update -q >/dev/null 2>&1 || error_exit "Не удалось обновить список пакетов"
-            apt-get install -y -q git >/dev/null 2>&1 || error_exit "Не удалось установить git"
+            export DEBIAN_FRONTEND=noninteractive
+            export NEEDRESTART_MODE=a
+            APT_LOG="/tmp/phobos-deploy-apt.log"
+            : > "$APT_LOG"
+            timeout 600 apt-get -o Acquire::ForceIPv4=true update -q >>"$APT_LOG" 2>&1 || {
+                tail -n 40 "$APT_LOG" >&2 || true
+                error_exit "Не удалось обновить список пакетов. Лог: $APT_LOG"
+            }
+            timeout 600 apt-get -o Acquire::ForceIPv4=true install -y -q git >>"$APT_LOG" 2>&1 || {
+                tail -n 40 "$APT_LOG" >&2 || true
+                error_exit "Не удалось установить git. Лог: $APT_LOG"
+            }
         else
             error_exit "Неподдерживаемая ОС"
         fi
