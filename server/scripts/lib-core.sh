@@ -80,6 +80,13 @@ load_env() {
   export SERVER_WG_PUBLIC_KEY="${SERVER_WG_PUBLIC_KEY:-}"
   export SERVER_WG_IPV4_NETWORK="${SERVER_WG_IPV4_NETWORK:-10.25.0.0/16}"
   export SERVER_WG_IPV6_NETWORK="${SERVER_WG_IPV6_NETWORK:-fd00:10:25::/48}"
+  export PHOBOS_CASCADE_ENABLED="${PHOBOS_CASCADE_ENABLED:-0}"
+  export PHOBOS_CASCADE_ROLE="${PHOBOS_CASCADE_ROLE:-off}"
+  export CASCADE_WG_INTERFACE="${CASCADE_WG_INTERFACE:-wg-exit}"
+  export CASCADE_WG_PORT="${CASCADE_WG_PORT:-51830}"
+  export CASCADE_CLIENT_NET="${CASCADE_CLIENT_NET:-$SERVER_WG_IPV4_NETWORK}"
+  export CASCADE_TABLE_ID="${CASCADE_TABLE_ID:-77}"
+  export CASCADE_TABLE_NAME="${CASCADE_TABLE_NAME:-phobos_exit}"
 }
 
 ensure_dirs() {
@@ -148,10 +155,16 @@ print_required_ports() {
   echo "ПОРТЫ, КОТОРЫЕ НУЖНО ОТКРЫТЬ НА VPS/В ПАНЕЛИ ХОСТИНГА:"
   echo "  ${http_port}/tcp  - HTTP-установщик клиентов: http://${public_endpoint}:${http_port}/init/<token>.sh"
   echo "  ${obf_port}/udp  - рабочий порт Phobos obfuscator/WireGuard"
+  if [[ "${PHOBOS_CASCADE_ENABLED:-0}" == "1" && "${PHOBOS_CASCADE_ROLE:-off}" == "exit" ]]; then
+    echo "  ${CASCADE_WG_PORT:-51830}/udp  - порт каскада VPS1 -> VPS2, нужен только на exit-node VPS2"
+  fi
   echo ""
   echo "Пример для ufw:"
   echo "  ufw allow ${http_port}/tcp"
   echo "  ufw allow ${obf_port}/udp"
+  if [[ "${PHOBOS_CASCADE_ENABLED:-0}" == "1" && "${PHOBOS_CASCADE_ROLE:-off}" == "exit" ]]; then
+    echo "  ufw allow ${CASCADE_WG_PORT:-51830}/udp"
+  fi
   echo ""
   echo "Важно: 51820/udp наружу обычно открывать не нужно, он слушает локально через wg-obfuscator."
 }

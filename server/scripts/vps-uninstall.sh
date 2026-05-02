@@ -74,6 +74,16 @@ if systemctl is-enabled --quiet wg-quick@wg0 2>/dev/null; then
   echo "  ✓ WireGuard отключен из автозапуска"
 fi
 
+if systemctl is-active --quiet wg-quick@wg-exit 2>/dev/null; then
+  systemctl stop wg-quick@wg-exit
+  echo "  ✓ Cascade wg-exit остановлен"
+fi
+
+if systemctl is-enabled --quiet wg-quick@wg-exit 2>/dev/null; then
+  systemctl disable wg-quick@wg-exit
+  echo "  ✓ Cascade wg-exit отключен из автозапуска"
+fi
+
 systemctl daemon-reload
 echo "  ✓ Systemd daemon перезагружен"
 
@@ -83,6 +93,11 @@ echo "==> Удаление WireGuard конфигурации..."
 if [[ -f /etc/wireguard/wg0.conf ]]; then
   rm /etc/wireguard/wg0.conf
   echo "  ✓ wg0.conf удален"
+fi
+
+if [[ -f /etc/wireguard/wg-exit.conf ]]; then
+  rm /etc/wireguard/wg-exit.conf
+  echo "  ✓ wg-exit.conf удален"
 fi
 
 if [[ -f /etc/sysctl.d/99-phobos.conf ]]; then

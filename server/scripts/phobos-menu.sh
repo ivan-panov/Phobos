@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CLIENT_SCRIPT="$SCRIPT_DIR/phobos-client.sh"
 SYSTEM_SCRIPT="$SCRIPT_DIR/phobos-system.sh"
 CONFIG_SCRIPT="$SCRIPT_DIR/vps-obfuscator-config.sh"
+CASCADE_SCRIPT="$SCRIPT_DIR/phobos-cascade.sh"
 source "$SCRIPT_DIR/lib-core.sh"
 load_env
 set +e
@@ -191,6 +192,35 @@ show_clients_menu() {
   done
 }
 
+
+show_cascade_menu() {
+  while true; do
+    show_header
+    echo "КАСКАД VPS1 -> VPS2"
+    echo ""
+    echo "Текущая роль: ${PHOBOS_CASCADE_ROLE:-off}"
+    echo "Интерфейс: ${CASCADE_WG_INTERFACE:-wg-exit}"
+    echo ""
+    echo "  1) Показать публичный ключ этого VPS"
+    echo "  2) Настроить этот VPS как VPS2 exit-node"
+    echo "  3) Настроить этот VPS как VPS1 entry-node"
+    echo "  4) Статус каскада"
+    echo "  5) Отключить каскад"
+    echo ""
+    echo "  0) Назад"
+    read -p "Выбор: " choice
+
+    case $choice in
+      1) "$CASCADE_SCRIPT" key; read -p "Enter..." ;;
+      2) "$CASCADE_SCRIPT" exit; load_env; read -p "Enter..." ;;
+      3) "$CASCADE_SCRIPT" entry; load_env; read -p "Enter..." ;;
+      4) "$CASCADE_SCRIPT" status; read -p "Enter..." ;;
+      5) read -p "Отключить каскад? [y/N]: " ans; [[ "$ans" =~ ^[Yy] ]] && "$CASCADE_SCRIPT" disable; load_env; read -p "Enter..." ;;
+      0) break ;;
+    esac
+  done
+}
+
 # System Menu
 show_system_menu() {
   while true; do
@@ -201,6 +231,7 @@ show_system_menu() {
     echo "  2) Очистка (токены, мусор)"
     echo "  3) Показать конфиг (env)"
     echo "  4) Показать порты для firewall"
+    echo "  5) Каскад VPS1 -> VPS2"
     echo ""
     echo "  0) Назад"
     read -p "Выбор: " choice
@@ -210,6 +241,7 @@ show_system_menu() {
       2) "$SYSTEM_SCRIPT" cleanup; read -p "Enter..." ;;
       3) cat "$PHOBOS_DIR/server/server.env"; echo ""; read -p "Enter..." ;;
       4) print_required_ports; read -p "Enter..." ;;
+      5) show_cascade_menu ;;
       0) break ;;
     esac
   done
