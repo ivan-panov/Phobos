@@ -77,7 +77,9 @@ action_add() {
   local oct4=$(echo "$client_ip_v4" | cut -d. -f4)
   local hex_part=$(printf "%x:%x" "$oct3" "$oct4")
   local client_ip_v6=""
-  [[ -n "$server_ip_v6" ]] && client_ip_v6="${ipv6_prefix_main}::${hex_part}"
+  if [[ "${PHOBOS_IPV6_ENABLED:-0}" == "1" && -n "$server_ip_v6" ]]; then
+    client_ip_v6="${ipv6_prefix_main}::${hex_part}"
+  fi
   
   log_info "Назначен IP: $client_ip_v4 $([[ -n $client_ip_v6 ]] && echo "/ $client_ip_v6")"
   

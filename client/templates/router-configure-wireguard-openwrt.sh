@@ -28,7 +28,7 @@ Options:
   --client-name NAME          Client name (required)
   --client-private-key KEY    WireGuard private key (required)
   --client-ip IP              Client tunnel IPv4 address (required)
-  --client-ipv6 IP            Client tunnel IPv6 address (required)
+  --client-ipv6 IP            Client tunnel IPv6 address (optional, use none to disable)
   --server-public-key KEY     Server WireGuard public key (required)
   --endpoint-port PORT        Local obfuscator port (default: 13255)
   --keepalive SECONDS         Keepalive interval (default: 25)
@@ -116,8 +116,7 @@ parse_args() {
     done
 
     if [ -z "${CLIENT_NAME}" ] || [ -z "${CLIENT_PRIVATE_KEY}" ] || \
-       [ -z "${CLIENT_IP}" ] || [ -z "${CLIENT_IPV6}" ] || \
-       [ -z "${SERVER_PUBLIC_KEY}" ]; then
+       [ -z "${CLIENT_IP}" ] || [ -z "${SERVER_PUBLIC_KEY}" ]; then
         error "Missing required parameters"
         usage
     fi
@@ -178,7 +177,9 @@ configure_wireguard_interface() {
     uci set network.${peer_name}.route_allowed_ips='0'
 
     uci add_list network.${peer_name}.allowed_ips='0.0.0.0/0'
-    uci add_list network.${peer_name}.allowed_ips='::/0'
+    if [ "${CLIENT_IPV6}" != "none" ] && [ -n "${CLIENT_IPV6}" ]; then
+        uci add_list network.${peer_name}.allowed_ips='::/0'
+    fi
 
     uci commit network
 

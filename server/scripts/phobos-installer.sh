@@ -113,28 +113,50 @@ step_wg() {
   local wg_ipv6_net="fd00:10:25::/48"
   local wg_ipv4_addr="10.25.0.1/16"
   local wg_ipv6_addr="fd00:10:25::1/48"
+  local pub_ip_v6=""
+  pub_ip_v6=$(get_public_ipv6 2>/dev/null || true)
+  local ipv6_enabled=0
+  [[ -n "$pub_ip_v6" ]] && ipv6_enabled=1
 
   cat > "$SERVER_ENV" <<EOF
 SERVER_WG_PRIVATE_KEY=$priv
 SERVER_WG_PUBLIC_KEY=$pub
 SERVER_WG_IPV4_NETWORK=$wg_ipv4_net
 SERVER_WG_IPV6_NETWORK=$wg_ipv6_net
+PHOBOS_IPV6_ENABLED=$ipv6_enabled
 EOF
 
   local iface=$(ip route | grep default | awk '{print $5}' | head -1)
+  local address_line="$wg_ipv4_addr"
+  local postup="iptables -A FORWARD -i wg0 -o wg0 -j DROP; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE"
+  local postdown="iptables -D FORWARD -i wg0 -o wg0 -j DROP; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE"
+
+  if [[ "$ipv6_enabled" == "1" ]]; then
+    address_line="$wg_ipv4_addr, $wg_ipv6_addr"
+    postup="$postup; ip6tables -A FORWARD -i wg0 -o wg0 -j DROP; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o $iface -j MASQUERADE"
+    postdown="$postdown; ip6tables -D FORWARD -i wg0 -o wg0 -j DROP; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o $iface -j MASQUERADE"
+    log_info "IPv6 обнаружен ($pub_ip_v6) — включаю IPv6 в WireGuard"
+  else
+    log_warn "Публичный IPv6 не обнаружен — WireGuard будет настроен только на IPv4"
+  fi
 
   cat > "$WG_CONFIG" <<EOF
 [Interface]
-Address = $wg_ipv4_addr, $wg_ipv6_addr
+Address = $address_line
 ListenPort = 51820
 PrivateKey = $priv
-PostUp = iptables -A FORWARD -i wg0 -o wg0 -j DROP; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE; ip6tables -A FORWARD -i wg0 -o wg0 -j DROP; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o $iface -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -o wg0 -j DROP; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE; ip6tables -D FORWARD -i wg0 -o wg0 -j DROP; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o $iface -j MASQUERADE
+PostUp = $postup
+PostDown = $postdown
 EOF
   chmod 600 "$WG_CONFIG"
 
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-phobos.conf
+  {
+    echo "net.ipv4.ip_forward=1"
+    if [[ "$ipv6_enabled" == "1" ]]; then
+      echo "net.ipv6.conf.all.forwarding=1"
+    fi
+  } > /etc/sysctl.d/99-phobos.conf
   sysctl -p /etc/sysctl.d/99-phobos.conf >/dev/null
 
   systemctl enable wg-quick@wg0
@@ -169,7 +191,10 @@ step_obf() {
       log_error "Неверный формат IP, повторите"
     done
   fi
-  local pub_ip_v6=$(get_public_ipv6)
+  local pub_ip_v6=""
+  if [[ "${PHOBOS_IPV6_ENABLED:-0}" == "1" ]]; then
+    pub_ip_v6=$(get_public_ipv6 2>/dev/null || true)
+  fi
 
   cat >> "$SERVER_ENV" <<EOF
 OBFUSCATOR_PORT=$port
