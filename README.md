@@ -26,17 +26,17 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ivan-panov/Phobos/main/p
 
 **Keenetic/Netcraze/ImmortalWrt** (терминал Entware):
 ```bash
-wget -O - http://<server_ip>:8080/init/<token>.sh | sh
+wget -O - http://<server_ip>:<port>/init/<token>.sh | sh
 ```
 
 **OpenWrt** (SSH):
 ```bash
-wget -O - http://<server_ip>:8080/init/<token>.sh | sh
+wget -O - http://<server_ip>:<port>/init/<token>.sh | sh
 ```
 
 **Linux (Ubuntu/Debian)** (SSH или терминал):
 ```bash
-wget -O - http://<server_ip>:8080/init/<token>.sh | sudo sh
+wget -O - http://<server_ip>:<port>/init/<token>.sh | sudo sh
 ```
 
 <details>
@@ -61,13 +61,13 @@ wget -O - http://<server_ip>:8080/init/<token>.sh | sudo sh
 Пример команды клиента:
 
 ```bash
-wget -qO- http://89.xxx.xxx.xxx:3485/init/deb790bbaxxxxxxxxxxx.sh | sh
+wget -qO- http://89.xxx.xxx.xxx:<port>/init/deb790bbaxxxxxxxxxxx.sh | sh
 ```
 
 Для такого примера на VPS или в панели хостинга нужно открыть минимум:
 
 ```bash
-ufw allow 3485/tcp
+ufw allow <port>/tcp
 ufw allow <OBFUSCATOR_PORT>/udp
 ```
 
