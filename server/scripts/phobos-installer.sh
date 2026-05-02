@@ -33,6 +33,58 @@ get_obf_params() {
   esac
 }
 
+
+choose_public_endpoint() {
+  local detected_ip="$1"
+  local endpoint="${SERVER_PUBLIC_ENDPOINT:-${PHOBOS_PUBLIC_ENDPOINT:-}}"
+
+  if [[ -n "$endpoint" ]]; then
+    endpoint="$(sanitize_public_endpoint "$endpoint")"
+    if is_valid_public_endpoint "$endpoint"; then
+      echo "$endpoint"
+      return 0
+    fi
+    log_warn "SERVER_PUBLIC_ENDPOINT/PHOBOS_PUBLIC_ENDPOINT имеет неверный формат: $endpoint"
+  fi
+
+  echo "" >&2
+  echo "Какой публичный адрес использовать в клиентских конфигурациях?" >&2
+  echo "  1) IPv4 VPS: ${detected_ip}" >&2
+  echo "  2) Домен, например vpn.example.com" >&2
+  echo "  3) Другой IPv4" >&2
+  read -rp "Выбор [1]: " choice
+  choice="${choice:-1}"
+
+  case "$choice" in
+    2)
+      while true; do
+        read -rp "Введите домен без http:// и без порта: " endpoint
+        endpoint="$(sanitize_public_endpoint "$endpoint")"
+        if is_valid_public_endpoint "$endpoint" && [[ ! "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "$endpoint"
+          return 0
+        fi
+        log_error "Неверный домен. Пример: vpn.example.com"
+      done
+      ;;
+    3)
+      while true; do
+        read -rp "Введите публичный IPv4 VPS: " endpoint
+        endpoint="$(sanitize_public_endpoint "$endpoint")"
+        if [[ "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "$endpoint"
+          return 0
+        fi
+        log_error "Неверный IPv4. Пример: 89.125.122.115"
+      done
+      ;;
+    *)
+      echo "$detected_ip"
+      return 0
+      ;;
+  esac
+}
+
 log_info "Остановка существующих служб Phobos..."
 systemctl stop wg-obfuscator 2>/dev/null || true
 systemctl stop phobos-http 2>/dev/null || true
@@ -191,6 +243,9 @@ step_obf() {
       log_error "Неверный формат IP, повторите"
     done
   fi
+  local public_endpoint
+  public_endpoint=$(choose_public_endpoint "$pub_ip_v4")
+
   local pub_ip_v6=""
   if [[ "${PHOBOS_IPV6_ENABLED:-0}" == "1" ]]; then
     pub_ip_v6=$(get_public_ipv6 2>/dev/null || true)
@@ -203,6 +258,7 @@ OBFUSCATOR_DUMMY=$dummy
 OBFUSCATOR_IDLE=300
 OBFUSCATOR_MASKING=STUN
 SERVER_PUBLIC_IP_V4=$pub_ip_v4
+SERVER_PUBLIC_ENDPOINT=$public_endpoint
 SERVER_PUBLIC_IP_V6=$pub_ip_v6
 WG_LOCAL_ENDPOINT=127.0.0.1:51820
 CLIENT_WG_PORT=13255

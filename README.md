@@ -26,17 +26,17 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ivan-panov/Phobos/main/p
 
 **Keenetic/Netcraze/ImmortalWrt** (терминал Entware):
 ```bash
-wget -O - http://<server_ip>:<port>/init/<token>.sh | sh
+wget -O - http://<server_ip>:8080/init/<token>.sh | sh
 ```
 
 **OpenWrt** (SSH):
 ```bash
-wget -O - http://<server_ip>:<port>/init/<token>.sh | sh
+wget -O - http://<server_ip>:8080/init/<token>.sh | sh
 ```
 
 **Linux (Ubuntu/Debian)** (SSH или терминал):
 ```bash
-wget -O - http://<server_ip>:<port>/init/<token>.sh | sudo sh
+wget -O - http://<server_ip>:8080/init/<token>.sh | sudo sh
 ```
 
 <details>
@@ -51,27 +51,31 @@ wget -O - http://<server_ip>:<port>/init/<token>.sh | sudo sh
 
 ### Какие порты открыть на VPS
 
+При установке можно выбрать, какой публичный адрес использовать для клиентов: IPv4 VPS или домен. Домен должен заранее указывать DNS A-записью на IPv4 VPS.
+
 После установки Phobos использует два внешних порта:
 
 ```text
-<HTTP_PORT>/tcp        - выдача клиентского установщика, например http://89.xxx.xxx.xxx:3485/init/<token>.sh
+<HTTP_PORT>/tcp        - выдача клиентского установщика, например http://vpn.example.com:3485/init/<token>.sh
 <OBFUSCATOR_PORT>/udp  - рабочий порт VPN-туннеля через wg-obfuscator
 ```
 
 Пример команды клиента:
 
 ```bash
-wget -qO- http://89.xxx.xxx.xxx:<port>/init/deb790bbaxxxxxxxxxxx.sh | sh
+wget -qO- http://vpn.example.com:3485/init/deb790bbace89dbc20cf1d03be3aa5c1.sh | sh
 ```
 
 Для такого примера на VPS или в панели хостинга нужно открыть минимум:
 
 ```bash
-ufw allow <port>/tcp
+ufw allow 3485/tcp
 ufw allow <OBFUSCATOR_PORT>/udp
 ```
 
 Точный `OBFUSCATOR_PORT` показывает меню Phobos и команда выдачи ссылки клиенту. Порт WireGuard `51820/udp` наружу обычно открывать не нужно: он используется локально, а внешний трафик принимает `wg-obfuscator`.
+
+Изменить адрес позже можно в меню `phobos` → настройки obfuscator → `Endpoint для клиентов`. После смены endpoint Phobos пересоберёт клиентские пакеты и новые ссылки будут использовать выбранный домен или IP.
 
 ## Управление системой
 

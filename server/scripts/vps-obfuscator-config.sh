@@ -15,6 +15,7 @@ load_config() {
   OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-$(grep 'source-lport' "$OBF_CONFIG" 2>/dev/null | awk '{print $3}' || echo 51821)}"
   OBFUSCATOR_KEY="${OBFUSCATOR_KEY:-$(grep 'key' "$OBF_CONFIG" 2>/dev/null | awk '{print $3}' || echo "KEY")}"
   SERVER_PUBLIC_IP_V4="${SERVER_PUBLIC_IP_V4:-0.0.0.0}"
+  SERVER_PUBLIC_ENDPOINT="${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}"
   SERVER_PUBLIC_IP_V6="${SERVER_PUBLIC_IP_V6:-}"
   WG_LOCAL_ENDPOINT="${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}"
   CLIENT_WG_PORT="${CLIENT_WG_PORT:-13255}"
@@ -36,7 +37,7 @@ load_config() {
 
 save_server_env() {
   if [[ -f "$SERVER_ENV" ]]; then
-    grep -vE '^(OBFUSCATOR_PORT|OBFUSCATOR_KEY|OBFUSCATOR_DUMMY|OBFUSCATOR_IDLE|OBFUSCATOR_MASKING|SERVER_PUBLIC_IP_V4|SERVER_PUBLIC_IP_V6|WG_LOCAL_ENDPOINT|CLIENT_WG_PORT|SERVER_WG_IPV4_NETWORK|SERVER_WG_IPV6_NETWORK)=' "$SERVER_ENV" > "$SERVER_ENV.tmp"
+    grep -vE '^(OBFUSCATOR_PORT|OBFUSCATOR_KEY|OBFUSCATOR_DUMMY|OBFUSCATOR_IDLE|OBFUSCATOR_MASKING|SERVER_PUBLIC_IP_V4|SERVER_PUBLIC_ENDPOINT|SERVER_PUBLIC_IP_V6|WG_LOCAL_ENDPOINT|CLIENT_WG_PORT|SERVER_WG_IPV4_NETWORK|SERVER_WG_IPV6_NETWORK)=' "$SERVER_ENV" > "$SERVER_ENV.tmp"
     mv "$SERVER_ENV.tmp" "$SERVER_ENV"
   fi
 
@@ -47,6 +48,7 @@ OBFUSCATOR_DUMMY=$CURRENT_DUMMY
 OBFUSCATOR_IDLE=$CURRENT_IDLE
 OBFUSCATOR_MASKING=$CURRENT_MASKING
 SERVER_PUBLIC_IP_V4=$SERVER_PUBLIC_IP_V4
+SERVER_PUBLIC_ENDPOINT=${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}
 SERVER_PUBLIC_IP_V6=$SERVER_PUBLIC_IP_V6
 WG_LOCAL_ENDPOINT=$WG_LOCAL_ENDPOINT
 CLIENT_WG_PORT=$CLIENT_WG_PORT
@@ -453,37 +455,52 @@ change_wg_listen_port() {
   read -p "Нажмите Enter..."
 }
 
-change_server_ip() {
+change_public_endpoint() {
   echo ""
-  echo "Текущий публичный IP сервера: $SERVER_PUBLIC_IP_V4"
-  echo "1) Определить из сетевого интерфейса"
-  echo "2) Ввести вручную"
+  echo "=== Публичный адрес для клиентов ==="
+  echo "Текущий IPv4 VPS: ${SERVER_PUBLIC_IP_V4:-не задан}"
+  echo "Текущий endpoint: ${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}"
+  echo ""
+  echo "1) Использовать IPv4 VPS из сетевого интерфейса"
+  echo "2) Ввести другой IPv4 VPS"
+  echo "3) Указать домен, например vpn.example.com"
   read -p "Выбор: " choice
 
-  local ip=""
+  local endpoint=""
   if [[ "$choice" == "1" ]]; then
-    ip=$(get_public_ipv4) || true
-    if [[ -z "$ip" ]]; then
+    endpoint=$(get_public_ipv4) || true
+    if [[ -z "$endpoint" ]]; then
       log_error "Не удалось определить IP из сетевого интерфейса"
       read -p "Нажмите Enter..."
       return
     fi
+    SERVER_PUBLIC_IP_V4="$endpoint"
   elif [[ "$choice" == "2" ]]; then
-    read -p "Введите IPv4: " input
-    if [[ ! "$input" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    read -p "Введите IPv4 VPS: " endpoint
+    endpoint="$(sanitize_public_endpoint "$endpoint")"
+    if [[ ! "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       log_error "Неверный формат IP"
       read -p "Нажмите Enter..."
       return
     fi
-    ip="$input"
+    SERVER_PUBLIC_IP_V4="$endpoint"
+  elif [[ "$choice" == "3" ]]; then
+    read -p "Введите домен без http:// и без порта: " endpoint
+    endpoint="$(sanitize_public_endpoint "$endpoint")"
+    if ! is_valid_public_endpoint "$endpoint" || [[ "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      log_error "Неверный домен. Пример: vpn.example.com"
+      read -p "Нажмите Enter..."
+      return
+    fi
   else
     return
   fi
 
-  SERVER_PUBLIC_IP_V4="$ip"
+  SERVER_PUBLIC_ENDPOINT="$endpoint"
   save_server_env
   rebuild_all_clients
-  log_success "Публичный IP сервера обновлен: $SERVER_PUBLIC_IP_V4"
+  log_success "Публичный endpoint для клиентов обновлен: $SERVER_PUBLIC_ENDPOINT"
+  log_info "Новые ссылки будут вида: http://${SERVER_PUBLIC_ENDPOINT}:${HTTP_PORT:-80}/init/<token>.sh"
   read -p "Нажмите Enter..."
 }
 
@@ -511,7 +528,7 @@ show_menu() {
   local wg_port=$(grep "^ListenPort" "$WG_CONFIG" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
   echo " 10) Смена пула адресов WG  (IPv4/IPv6)"
   echo " 11) Порт WireGuard         [${wg_port:-51820}]"
-  echo " 12) Публичный IP сервера   [$SERVER_PUBLIC_IP_V4]"
+  echo " 12) Endpoint для клиентов  [${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}]"
   echo ""
   echo "  0) Назад"
   echo ""
@@ -529,7 +546,7 @@ show_menu() {
     9) change_dummy ;;
     10) change_wg_pool ;;
     11) change_wg_listen_port ;;
-    12) change_server_ip ;;
+    12) change_public_endpoint ;;
     0) exit 0 ;;
     *) echo "Неверный выбор" ;;
   esac
