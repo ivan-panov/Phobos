@@ -196,7 +196,7 @@ remove_wireguard_interface() {
 configure_wireguard_interface() {
     local interface_name="$1"
 
-    local description="Phobos-${CLIENT_NAME}-${PHOBOS_PROFILE}"
+    local description="Phobos-${CLIENT_NAME}"
     local client_ip_addr=$(echo "${CLIENT_IP}" | cut -d'/' -f1)
     local client_ipv6_block="${CLIENT_IPV6}"
 
@@ -326,7 +326,7 @@ verify_interface_created() {
         return 1
     fi
 
-    local found=$(echo "$interfaces" | jq -r "to_entries[] | select(.value.description == "$interface_description") | .key" 2>/dev/null)
+    local found=$(echo "$interfaces" | jq -r --arg desc "$interface_description" 'to_entries[] | select(.value.description == $desc) | .key' 2>/dev/null)
 
     if [ -n "$found" ]; then
         log "✓ Интерфейс $found ($interface_description) успешно создан"
@@ -365,7 +365,7 @@ main() {
     fi
 
     mkdir -p /opt/etc/Phobos
-    PROFILE_DESCRIPTION="Phobos-${CLIENT_NAME}-${PHOBOS_PROFILE}"
+    PROFILE_DESCRIPTION="Phobos-${CLIENT_NAME}"
 
     log "=== Phobos WireGuard RCI Configuration ==="
     log "Клиент: ${CLIENT_NAME}"
