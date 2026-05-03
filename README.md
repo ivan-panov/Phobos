@@ -136,6 +136,60 @@ ufw allow 51830/udp
 
 Проверка и отключение доступны в том же меню: `Статус каскада` и `Отключить каскад`.
 
+
+## VPS1 → VPS2 через Xray/Remnawave
+
+Альтернативный режим для схемы:
+
+```text
+клиент / роутер Keenetic → VPS1 Phobos → VPS2 Remnawave/Xray → интернет
+```
+
+В этом режиме Keenetic и VPS1 продолжают использовать обычный Phobos/WireGuard с `wg-obfuscator`. На VPS2 не нужен Phobos exit-node: VPS2 работает как Remnawave Node/Xray-сервер, а VPS1 запускает локальный Xray-клиент и прозрачно отправляет в него только трафик клиентской сети Phobos.
+
+### Быстрая настройка
+
+1. На VPS2 создайте пользователя/подписку в Remnawave и получите `vless://...` ссылку. Рекомендуемый профиль: VLESS + TCP + REALITY.
+2. На VPS1 откройте меню:
+
+```bash
+phobos
+```
+
+3. Перейдите в `Системные функции` → `Выход VPS1 через VPS2 Xray/Remnawave` → `Настроить выход через VPS2 Remnawave`.
+4. Вставьте VLESS-ссылку из Remnawave.
+
+Скрипт на VPS1:
+
+- устанавливает Xray-core, если он ещё не установлен;
+- создаёт `/usr/local/etc/xray/config.json`;
+- добавляет `dokodemo-door` TPROXY inbound на порт `12345`;
+- добавляет тестовый SOCKS inbound `127.0.0.1:10808`;
+- настраивает `iptables -t mangle` и policy routing так, чтобы только сеть клиентов Phobos `10.25.0.0/16` с интерфейса `wg0` уходила в Xray outbound на VPS2.
+
+Проверка на VPS1:
+
+```bash
+/opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh status
+/opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh test
+```
+
+Проверка с клиента за Keenetic:
+
+```bash
+curl -4 ifconfig.me
+```
+
+Должен отображаться IP VPS2.
+
+Отключение:
+
+```bash
+/opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh disable
+```
+
+Этот режим не использует `wg-exit` и не требует открытия каскадного UDP-порта `51830` на VPS2. На VPS2 должны быть открыты только порты Remnawave/Xray inbound, например `443/tcp`, и служебный `NODE_PORT` только для IP панели Remnawave.
+
 ## Удаление
 
 ### Удаление с VPS сервера

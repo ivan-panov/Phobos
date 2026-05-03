@@ -8,6 +8,7 @@ CLIENT_SCRIPT="$SCRIPT_DIR/phobos-client.sh"
 SYSTEM_SCRIPT="$SCRIPT_DIR/phobos-system.sh"
 CONFIG_SCRIPT="$SCRIPT_DIR/vps-obfuscator-config.sh"
 CASCADE_SCRIPT="$SCRIPT_DIR/phobos-cascade.sh"
+XRAY_REMNAWAVE_SCRIPT="$SCRIPT_DIR/phobos-xray-remnawave.sh"
 source "$SCRIPT_DIR/lib-core.sh"
 load_env
 set +e
@@ -221,6 +222,34 @@ show_cascade_menu() {
   done
 }
 
+
+show_xray_remnawave_menu() {
+  while true; do
+    show_header
+    echo "VPS1 -> VPS2 XRAY/REMNAWAVE"
+    echo ""
+    echo "Схема: Keenetic -> VPS1 Phobos -> VPS2 Remnawave/Xray -> интернет"
+    echo "Включено: ${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}"
+    echo "Клиентская сеть: ${XRAY_CLIENT_NET:-${SERVER_WG_IPV4_NETWORK:-10.25.0.0/16}}"
+    echo ""
+    echo "  1) Настроить выход через VPS2 Remnawave"
+    echo "  2) Статус"
+    echo "  3) Тест Xray outbound"
+    echo "  4) Отключить"
+    echo ""
+    echo "  0) Назад"
+    read -p "Выбор: " choice
+
+    case $choice in
+      1) "$XRAY_REMNAWAVE_SCRIPT" setup; load_env; read -p "Enter..." ;;
+      2) "$XRAY_REMNAWAVE_SCRIPT" status; read -p "Enter..." ;;
+      3) "$XRAY_REMNAWAVE_SCRIPT" test; read -p "Enter..." ;;
+      4) read -p "Отключить Xray/Remnawave-выход? [y/N]: " ans; [[ "$ans" =~ ^[Yy] ]] && "$XRAY_REMNAWAVE_SCRIPT" disable; load_env; read -p "Enter..." ;;
+      0) break ;;
+    esac
+  done
+}
+
 # System Menu
 show_system_menu() {
   while true; do
@@ -231,7 +260,8 @@ show_system_menu() {
     echo "  2) Очистка (токены, мусор)"
     echo "  3) Показать конфиг (env)"
     echo "  4) Показать порты для firewall"
-    echo "  5) Каскад VPS1 -> VPS2"
+    echo "  5) Каскад VPS1 -> VPS2 через WireGuard"
+    echo "  6) Выход VPS1 через VPS2 Xray/Remnawave"
     echo ""
     echo "  0) Назад"
     read -p "Выбор: " choice
@@ -242,6 +272,7 @@ show_system_menu() {
       3) cat "$PHOBOS_DIR/server/server.env"; echo ""; read -p "Enter..." ;;
       4) print_required_ports; read -p "Enter..." ;;
       5) show_cascade_menu ;;
+      6) show_xray_remnawave_menu ;;
       0) break ;;
     esac
   done
