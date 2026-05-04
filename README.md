@@ -222,7 +222,12 @@ sudo /opt/Phobos/repo/server/scripts/vps-uninstall.sh --keep-data
 ```bash
 sudo /opt/Phobos/phobos-uninstall.sh
 ```
-
+**Полезные команды**
+Команда Описание
+phobos Главное меню<BR>
+```phobos status``` Быстрый статус<BR>
+```phobos client add``` Добавить клиента<BR>
+```phobos restart``` Перезапустить все сервисы
 <details>
   <summary>Подробней</summary>
 
