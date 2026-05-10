@@ -10,6 +10,9 @@ load_env
 ensure_dirs
 
 XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+XRAY_CONFIG_DIR="$(dirname "$XRAY_CONFIG")"
+XRAY_PHOBOS_MANAGED_MARKER="${XRAY_PHOBOS_MANAGED_MARKER:-/usr/local/etc/xray/phobos-managed}"
+XRAY_PHOBOS_INSTALLED_MARKER="${XRAY_PHOBOS_INSTALLED_MARKER:-/usr/local/etc/xray/phobos-installed-by-phobos}"
 XRAY_TPROXY_PORT="${XRAY_TPROXY_PORT:-12345}"
 XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-10808}"
 XRAY_MARK="${XRAY_MARK:-1}"
@@ -82,6 +85,10 @@ install_xray_if_needed() {
   if ! need_cmd xray; then
     die "Xray не установился. Проверьте доступ к GitHub и повторите."
   fi
+
+  mkdir -p "$XRAY_CONFIG_DIR"
+  touch "$XRAY_PHOBOS_INSTALLED_MARKER"
+  log_info "Xray помечен как установленный Phobos: $XRAY_PHOBOS_INSTALLED_MARKER"
 }
 
 json_escape_to_file() {
@@ -271,6 +278,13 @@ fix_xray_config_permissions() {
     chown root:"$service_group" "$XRAY_CONFIG" 2>/dev/null || true
     chmod 640 "$XRAY_CONFIG" 2>/dev/null || true
   fi
+
+  for marker in "$XRAY_PHOBOS_MANAGED_MARKER" "$XRAY_PHOBOS_INSTALLED_MARKER"; do
+    if [[ -f "$marker" ]]; then
+      chown root:"$service_group" "$marker" 2>/dev/null || true
+      chmod 640 "$marker" 2>/dev/null || true
+    fi
+  done
 }
 
 write_xray_config() {
@@ -336,6 +350,13 @@ write_xray_config() {
       }
     }
   ' > "$XRAY_CONFIG"
+
+  cat > "$XRAY_PHOBOS_MANAGED_MARKER" <<EOF_MARKER
+managed_by=phobos
+component=xray-remnawave
+config=$XRAY_CONFIG
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF_MARKER
 
   fix_xray_config_permissions
   xray run -test -config "$XRAY_CONFIG" >/dev/null
