@@ -234,7 +234,11 @@ show_xray_remnawave_menu() {
     echo ""
     echo "  1) Настроить выход через VPS2 Remnawave"
     echo "  2) Статус"
-    echo "  3) Тест Xray outbound"
+    if [[ "${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}" == "1" ]]; then
+      echo "  3) Тест Xray outbound"
+    else
+      echo "  3) Тест Xray outbound (доступен после настройки)"
+    fi
     echo "  4) Отключить"
     echo ""
     echo "  0) Назад"
@@ -243,7 +247,14 @@ show_xray_remnawave_menu() {
     case $choice in
       1) "$XRAY_REMNAWAVE_SCRIPT" setup; load_env; read -p "Enter..." ;;
       2) "$XRAY_REMNAWAVE_SCRIPT" status; read -p "Enter..." ;;
-      3) "$XRAY_REMNAWAVE_SCRIPT" test; read -p "Enter..." ;;
+      3)
+        if [[ "${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}" == "1" ]]; then
+          "$XRAY_REMNAWAVE_SCRIPT" test
+        else
+          echo "Xray/Remnawave-выход выключен. Сначала выберите пункт 1: Настроить выход через VPS2 Remnawave."
+        fi
+        read -p "Enter..."
+        ;;
       4) read -p "Отключить Xray/Remnawave-выход? [y/N]: " ans; [[ "$ans" =~ ^[Yy] ]] && "$XRAY_REMNAWAVE_SCRIPT" disable; load_env; read -p "Enter..." ;;
       0) break ;;
     esac

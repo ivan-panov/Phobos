@@ -612,13 +612,43 @@ status_cmd() {
 }
 
 test_cmd() {
+  if [[ "${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}" != "1" ]]; then
+    echo "Xray/Remnawave-выход выключен: PHOBOS_XRAY_REMNAWAVE_ENABLED=${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}"
+    echo "Тест не выполняется. Сначала выберите пункт 1: Настроить выход через VPS2 Remnawave."
+    echo ""
+    return 0
+  fi
+
   if ! need_cmd curl; then
     if need_cmd apt-get; then
       apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl
     fi
   fi
+
+  if ! systemctl is-active --quiet xray; then
+    echo "Xray/Remnawave-выход включён, но сервис xray не запущен."
+    echo "Запустите: systemctl restart xray"
+    echo "Потом проверьте: journalctl -u xray -n 80 --no-pager"
+    echo ""
+    return 1
+  fi
+
+  if ! ss -lnt 2>/dev/null | grep -qE "127\.0\.0\.1:${XRAY_SOCKS_PORT}\b"; then
+    echo "Xray запущен, но SOCKS test порт 127.0.0.1:${XRAY_SOCKS_PORT} не слушается."
+    echo "Проверьте конфиг: xray run -test -config ${XRAY_CONFIG}"
+    echo "Потом проверьте логи: journalctl -u xray -n 80 --no-pager"
+    echo ""
+    return 1
+  fi
+
   echo "Проверяю IP через Xray SOCKS 127.0.0.1:${XRAY_SOCKS_PORT}..."
-  curl -4 --connect-timeout 10 --max-time 20 --socks5-hostname "127.0.0.1:${XRAY_SOCKS_PORT}" https://ifconfig.me || true
+  if ! curl -4 --connect-timeout 10 --max-time 20 --socks5-hostname "127.0.0.1:${XRAY_SOCKS_PORT}" https://ifconfig.me; then
+    echo ""
+    echo "Не удалось выйти через Xray SOCKS. Проверьте доступность VPS2/домен/порт Remnawave и логи xray."
+    echo "journalctl -u xray -n 80 --no-pager"
+    echo ""
+    return 1
+  fi
   echo ""
 }
 
