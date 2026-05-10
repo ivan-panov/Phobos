@@ -220,6 +220,59 @@ build_outbound_json() {
   '
 }
 
+xray_service_user() {
+  local user
+  user="$(systemctl show -p User --value xray 2>/dev/null || true)"
+  [[ -n "$user" ]] || user="root"
+  echo "$user"
+}
+
+xray_service_group() {
+  local user group
+  user="$(xray_service_user)"
+  group="$(systemctl show -p Group --value xray 2>/dev/null || true)"
+
+  if [[ -z "$group" ]]; then
+    if [[ "$user" == "root" ]]; then
+      group="root"
+    else
+      group="$(id -gn "$user" 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "$group" ]]; then
+    if getent group nogroup >/dev/null 2>&1; then
+      group="nogroup"
+    elif getent group nobody >/dev/null 2>&1; then
+      group="nobody"
+    else
+      group="root"
+    fi
+  fi
+
+  echo "$group"
+}
+
+fix_xray_config_permissions() {
+  local config_dir service_group
+  config_dir="$(dirname "$XRAY_CONFIG")"
+  service_group="$(xray_service_group)"
+
+  mkdir -p "$config_dir"
+
+  # xray.service in XTLS packages can run as User=nobody.  The config is
+  # written by this root script, so keep root ownership but grant read/execute
+  # to the service group.  Parent directories must remain traversable too.
+  chmod 755 /usr /usr/local /usr/local/etc 2>/dev/null || true
+  chown root:"$service_group" "$config_dir" 2>/dev/null || true
+  chmod 750 "$config_dir" 2>/dev/null || true
+
+  if [[ -f "$XRAY_CONFIG" ]]; then
+    chown root:"$service_group" "$XRAY_CONFIG" 2>/dev/null || true
+    chmod 640 "$XRAY_CONFIG" 2>/dev/null || true
+  fi
+}
+
 write_xray_config() {
   local outbound_json="$1"
   mkdir -p "$(dirname "$XRAY_CONFIG")"
@@ -284,7 +337,7 @@ write_xray_config() {
     }
   ' > "$XRAY_CONFIG"
 
-  chmod 600 "$XRAY_CONFIG"
+  fix_xray_config_permissions
   xray run -test -config "$XRAY_CONFIG" >/dev/null
 }
 
@@ -422,6 +475,7 @@ EOF_WATCHDOG_TIMER
 stabilize() {
   install_deps
   write_xray_service_override
+  fix_xray_config_permissions
   systemctl enable xray >/dev/null 2>&1 || true
   systemctl restart xray
   apply_rules
