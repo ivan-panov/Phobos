@@ -51,7 +51,7 @@ clone_repository() {
 
     cd "$REPO_DIR"
     git init >/dev/null 2>&1
-    git remote add origin https://github.com/Ground-Zerro/Phobos.git >/dev/null 2>&1
+    git remote add origin https://github.com/ivan-panov/Phobos.git >/dev/null 2>&1
     git config core.sparseCheckout true >/dev/null 2>&1
 
     echo "server" > .git/info/sparse-checkout
