@@ -8,6 +8,7 @@ CLIENT_SCRIPT="$SCRIPT_DIR/phobos-client.sh"
 SYSTEM_SCRIPT="$SCRIPT_DIR/phobos-system.sh"
 CONFIG_SCRIPT="$SCRIPT_DIR/vps-obfuscator-config.sh"
 XRAY_REMNAWAVE_SCRIPT="$SCRIPT_DIR/phobos-xray-remnawave.sh"
+UFW_SCRIPT="$SCRIPT_DIR/phobos-ufw.sh"
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "Требуются root привилегии. Запустите: sudo phobos"
@@ -274,6 +275,46 @@ show_xray_remnawave_menu() {
   done
 }
 
+
+show_ufw_menu() {
+  while true; do
+    show_header
+    echo "UFW / ПОРТЫ PHOBOS"
+    echo ""
+    echo "  1) Открыть порты Phobos"
+    echo "  2) Закрыть порты Phobos"
+    echo "  3) Показать статус UFW и используемые порты"
+    echo ""
+    echo "  0) Назад"
+    read -p "Выбор: " choice
+
+    case $choice in
+      1)
+        "$UFW_SCRIPT" open
+        read -p "Нажмите Enter..."
+        ;;
+      2)
+        read -p "Закрыть UFW-правила Phobos? [y/N]: " ans
+        if [[ "$ans" =~ ^[Yy] ]]; then
+          "$UFW_SCRIPT" close
+        fi
+        read -p "Нажмите Enter..."
+        ;;
+      3)
+        "$UFW_SCRIPT" status
+        read -p "Нажмите Enter..."
+        ;;
+      0)
+        break
+        ;;
+      *)
+        echo "Неверный выбор"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
 # Main
 while true; do
   show_header
@@ -284,6 +325,7 @@ while true; do
   echo "  3) Настройка Obfuscator"
   echo "  4) Xray -> VPS2 Remnawave"
   echo "  5) Системные функции"
+  echo "  6) UFW / порты Phobos"
   echo ""
   echo "  0) Выход"
   echo ""
@@ -295,6 +337,7 @@ while true; do
     3) "$CONFIG_SCRIPT" ;;
     4) show_xray_remnawave_menu ;;
     5) show_system_menu ;;
+    6) show_ufw_menu ;;
     0) exit 0 ;;
     *) echo "Неверный выбор"; sleep 1 ;;
   esac
