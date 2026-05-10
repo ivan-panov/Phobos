@@ -31,6 +31,8 @@ usage() {
   disable      Отключить Xray/Remnawave-выход и убрать правила
   status       Показать статус Xray/Remnawave-выхода
   test         Проверить Xray outbound через локальный SOCKS
+  stabilize    Включить автоперезапуск Xray и watchdog проверки SOCKS
+  watchdog     Одноразовая watchdog-проверка SOCKS и восстановление при сбое
 USAGE
 }
 
@@ -348,6 +350,94 @@ remove_rules() {
   ip route flush table "$XRAY_ROUTE_TABLE_NAME" 2>/dev/null || true
 }
 
+write_xray_service_override() {
+  mkdir -p /etc/systemd/system/xray.service.d
+  cat > /etc/systemd/system/xray.service.d/phobos-tproxy.conf <<'EOF_XRAY_SERVICE'
+[Service]
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+Restart=always
+RestartSec=3
+EOF_XRAY_SERVICE
+
+  systemctl daemon-reload
+}
+
+write_watchdog_service() {
+  cat > /usr/local/sbin/phobos-xray-remnawave-watchdog.sh <<'EOF_WATCHDOG'
+#!/usr/bin/env bash
+set -u
+
+SERVER_ENV="/opt/Phobos/server/server.env"
+if [[ -f "$SERVER_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$SERVER_ENV"
+fi
+
+SOCKS_PORT="${XRAY_SOCKS_PORT:-10808}"
+CHECK_URL="${XRAY_WATCHDOG_URL:-https://ifconfig.me}"
+
+for attempt in 1 2 3; do
+  if curl -4 --connect-timeout 5 --max-time 12 --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -fsS "$CHECK_URL" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 3
+done
+
+logger -t phobos-xray-remnawave-watchdog "SOCKS check failed on 127.0.0.1:${SOCKS_PORT}; restarting xray and TPROXY rules"
+systemctl restart xray
+systemctl restart phobos-xray-remnawave-rules.service 2>/dev/null || true
+EOF_WATCHDOG
+
+  chmod +x /usr/local/sbin/phobos-xray-remnawave-watchdog.sh
+
+  cat > /etc/systemd/system/phobos-xray-remnawave-watchdog.service <<'EOF_WATCHDOG_SERVICE'
+[Unit]
+Description=Phobos Xray Remnawave watchdog
+After=network-online.target xray.service phobos-xray-remnawave-rules.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/phobos-xray-remnawave-watchdog.sh
+EOF_WATCHDOG_SERVICE
+
+  cat > /etc/systemd/system/phobos-xray-remnawave-watchdog.timer <<'EOF_WATCHDOG_TIMER'
+[Unit]
+Description=Run Phobos Xray Remnawave watchdog every minute
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+EOF_WATCHDOG_TIMER
+
+  systemctl daemon-reload
+  systemctl enable --now phobos-xray-remnawave-watchdog.timer >/dev/null 2>&1 || true
+}
+
+stabilize() {
+  install_deps
+  write_xray_service_override
+  systemctl enable xray >/dev/null 2>&1 || true
+  systemctl restart xray
+  apply_rules
+  write_rules_service
+  systemctl restart phobos-xray-remnawave-rules.service
+  write_watchdog_service
+  log_success "Стабилизация включена: Xray автоперезапускается, watchdog проверяет SOCKS каждые 60 секунд."
+}
+
+watchdog_cmd() {
+  if [[ ! -x /usr/local/sbin/phobos-xray-remnawave-watchdog.sh ]]; then
+    write_watchdog_service
+  fi
+  /usr/local/sbin/phobos-xray-remnawave-watchdog.sh
+}
+
 write_rules_service() {
   cat > /etc/systemd/system/phobos-xray-remnawave-rules.service <<EOF_SERVICE
 [Unit]
@@ -388,11 +478,7 @@ setup() {
   write_xray_config "$outbound_json" || die "Xray config test failed."
 
   mkdir -p /etc/systemd/system/xray.service.d
-  cat > /etc/systemd/system/xray.service.d/phobos-tproxy.conf <<'EOF_XRAY_SERVICE'
-[Service]
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-EOF_XRAY_SERVICE
+  write_xray_service_override
   systemctl daemon-reload
   systemctl enable xray >/dev/null 2>&1 || true
   systemctl restart xray
@@ -400,6 +486,7 @@ EOF_XRAY_SERVICE
   apply_rules
   write_rules_service
   systemctl restart phobos-xray-remnawave-rules.service
+  write_watchdog_service
 
   save_env_var PHOBOS_XRAY_REMNAWAVE_ENABLED 1
   save_env_var PHOBOS_XRAY_REMNAWAVE_ROLE entry
@@ -437,6 +524,7 @@ status_cmd() {
   echo ""
   systemctl is-active --quiet xray && echo "xray: RUNNING" || echo "xray: STOPPED"
   systemctl is-active --quiet phobos-xray-remnawave-rules.service && echo "rules service: RUNNING" || echo "rules service: STOPPED"
+  systemctl is-active --quiet phobos-xray-remnawave-watchdog.timer && echo "watchdog timer: RUNNING" || echo "watchdog timer: STOPPED"
   echo ""
   echo "ip rule:"
   ip rule show | grep -E "fwmark|${XRAY_ROUTE_TABLE_NAME}|${XRAY_ROUTE_TABLE_ID}" || echo "правил нет"
@@ -460,6 +548,8 @@ test_cmd() {
 }
 
 disable_all() {
+  systemctl stop phobos-xray-remnawave-watchdog.timer 2>/dev/null || true
+  systemctl disable phobos-xray-remnawave-watchdog.timer 2>/dev/null || true
   systemctl stop phobos-xray-remnawave-rules.service 2>/dev/null || true
   systemctl disable phobos-xray-remnawave-rules.service 2>/dev/null || true
   remove_rules
@@ -480,6 +570,8 @@ case "${1:-}" in
   disable-rules-internal) remove_rules ;;
   status) status_cmd ;;
   test) test_cmd ;;
+  stabilize) stabilize ;;
+  watchdog) watchdog_cmd ;;
   help|-h|--help|"") usage ;;
   *) usage; exit 1 ;;
 esac
