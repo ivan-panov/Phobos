@@ -2,7 +2,6 @@
 set -e
 
 CLIENT_NAME=""
-INTERFACE_NAME="phobos"
 CLIENT_PRIVATE_KEY=""
 CLIENT_IP=""
 CLIENT_IPV6=""
@@ -27,10 +26,9 @@ Usage: $0 [OPTIONS]
 
 Options:
   --client-name NAME          Client name (required)
-  --interface-name NAME       UCI WireGuard interface name (default: phobos)
   --client-private-key KEY    WireGuard private key (required)
   --client-ip IP              Client tunnel IPv4 address (required)
-  --client-ipv6 IP            Client tunnel IPv6 address (optional, use none to disable)
+  --client-ipv6 IP            Client tunnel IPv6 address (required)
   --server-public-key KEY     Server WireGuard public key (required)
   --endpoint-port PORT        Local obfuscator port (default: 13255)
   --keepalive SECONDS         Keepalive interval (default: 25)
@@ -73,10 +71,6 @@ parse_args() {
         case "$1" in
             --client-name)
                 CLIENT_NAME="$2"
-                shift 2
-                ;;
-            --interface-name)
-                INTERFACE_NAME="$2"
                 shift 2
                 ;;
             --client-private-key)
@@ -122,14 +116,15 @@ parse_args() {
     done
 
     if [ -z "${CLIENT_NAME}" ] || [ -z "${CLIENT_PRIVATE_KEY}" ] || \
-       [ -z "${CLIENT_IP}" ] || [ -z "${SERVER_PUBLIC_KEY}" ]; then
+       [ -z "${CLIENT_IP}" ] || [ -z "${CLIENT_IPV6}" ] || \
+       [ -z "${SERVER_PUBLIC_KEY}" ]; then
         error "Missing required parameters"
         usage
     fi
 }
 
 check_existing_interface() {
-    local interface_name="${INTERFACE_NAME}"
+    local interface_name="phobos_wg"
 
     if uci -q get network.${interface_name} >/dev/null 2>&1; then
         log "Найден существующий интерфейс: ${interface_name}"
@@ -141,7 +136,7 @@ check_existing_interface() {
 }
 
 remove_existing_interface() {
-    local interface_name="${INTERFACE_NAME}"
+    local interface_name="phobos_wg"
 
     log "Удаление существующего интерфейса ${interface_name}..."
 
@@ -157,7 +152,7 @@ remove_existing_interface() {
 }
 
 configure_wireguard_interface() {
-    local interface_name="${INTERFACE_NAME}"
+    local interface_name="phobos_wg"
 
     log "Настройка интерфейса ${interface_name} через UCI..."
 
@@ -183,9 +178,7 @@ configure_wireguard_interface() {
     uci set network.${peer_name}.route_allowed_ips='0'
 
     uci add_list network.${peer_name}.allowed_ips='0.0.0.0/0'
-    if [ "${CLIENT_IPV6}" != "none" ] && [ -n "${CLIENT_IPV6}" ]; then
-        uci add_list network.${peer_name}.allowed_ips='::/0'
-    fi
+    uci add_list network.${peer_name}.allowed_ips='::/0'
 
     uci commit network
 
@@ -194,8 +187,8 @@ configure_wireguard_interface() {
 }
 
 configure_firewall_zone() {
-    local zone_name="${INTERFACE_NAME}"
-    local interface_name="${INTERFACE_NAME}"
+    local zone_name="phobos"
+    local interface_name="phobos_wg"
 
     log "Настройка файрволла для зоны ${zone_name}..."
 
@@ -226,7 +219,7 @@ restart_network_services() {
     /etc/init.d/network reload >/dev/null 2>&1 || true
     sleep 3
 
-    ifup ${INTERFACE_NAME} >/dev/null 2>&1 || true
+    ifup phobos_wg >/dev/null 2>&1 || true
     sleep 2
 
     /etc/init.d/firewall reload >/dev/null 2>&1 || true
@@ -242,24 +235,24 @@ verify_interface_created() {
     local attempt=1
     
     while [ $attempt -le $max_attempts ]; do
-        if ip link show ${INTERFACE_NAME} >/dev/null 2>&1; then
-            log "Интерфейс ${INTERFACE_NAME} найден (попытка $attempt/$max_attempts)"
+        if ip link show phobos_wg >/dev/null 2>&1; then
+            log "Интерфейс phobos_wg найден (попытка $attempt/$max_attempts)"
             
-            if wg show ${INTERFACE_NAME} >/dev/null 2>&1; then
-                log "WireGuard интерфейс ${INTERFACE_NAME} активен"
+            if wg show phobos_wg >/dev/null 2>&1; then
+                log "WireGuard интерфейс phobos_wg активен"
                 
-                if uci -q get network.${INTERFACE_NAME} >/dev/null 2>&1; then
-                    log "UCI конфигурация ${INTERFACE_NAME} найдена"
+                if uci -q get network.phobos_wg >/dev/null 2>&1; then
+                    log "UCI конфигурация phobos_wg найдена"
                     return 0
                 else
-                    log "UCI конфигурация ${INTERFACE_NAME} не найдена, но интерфейс работает"
+                    log "UCI конфигурация phobos_wg не найдена, но интерфейс работает"
                     return 0
                 fi
             else
                 log "Интерфейс найден, но WireGuard не активен (попытка $attempt/$max_attempts)"
             fi
         else
-            log "Интерфейс ${INTERFACE_NAME} еще не создан (попытка $attempt/$max_attempts)..."
+            log "Интерфейс phobos_wg еще не создан (попытка $attempt/$max_attempts)..."
         fi
         
         if [ $attempt -lt $max_attempts ]; then
@@ -268,7 +261,7 @@ verify_interface_created() {
         attempt=$((attempt + 1))
     done
     
-    error "Интерфейс ${INTERFACE_NAME} не найден после $max_attempts попыток"
+    error "Интерфейс phobos_wg не найден после $max_attempts попыток"
     return 1
 }
 
@@ -325,15 +318,15 @@ main() {
         log ""
         log "WireGuard успешно настроен на OpenWRT"
         log ""
-        log "Интерфейс: ${INTERFACE_NAME}"
-        log "Файрволл зона: ${INTERFACE_NAME} (без форвардинга)"
+        log "Интерфейс: phobos_wg"
+        log "Файрволл зона: phobos (без форвардинга)"
         log ""
         log "Для маршрутизации трафика через туннель настройте правила"
         log "файрволла и маршрутизацию вручную через LuCI или UCI."
         log ""
         
         log "Текущий статус интерфейса:"
-        ip addr show ${INTERFACE_NAME} 2>/dev/null | sed 's/^/  /' || true
+        ip addr show phobos_wg 2>/dev/null | sed 's/^/  /' || true
         log ""
         
         exit 0
@@ -342,11 +335,11 @@ main() {
         log "Не удалось подтвердить создание интерфейса WireGuard"
         log ""
         log "Проверьте вручную:"
-        log "  ip link show ${INTERFACE_NAME}"
-        log "  wg show ${INTERFACE_NAME}"
-        log "  uci show network.${INTERFACE_NAME}"
+        log "  ip link show phobos_wg"
+        log "  wg show phobos_wg"
+        log "  uci show network.phobos_wg"
         log ""
-        log "Если интерфейс существует (ip link show ${INTERFACE_NAME} работает),"
+        log "Если интерфейс существует (ip link show phobos_wg работает),"
         log "то настройка прошла успешно, несмотря на ошибку проверки."
         log ""
         exit 1

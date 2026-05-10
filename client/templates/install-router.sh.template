@@ -90,10 +90,10 @@ setup_configs() {
   cp wg-obfuscator.conf "$PHOBOS_DIR/${OBF_CONF_NAME}"
   chmod 600 "$PHOBOS_DIR/${OBF_CONF_NAME}"
 
-  cp "${CLIENT_NAME}.conf" "$PHOBOS_DIR/${WG_CONF_NAME}"
-  chmod 600 "$PHOBOS_DIR/${WG_CONF_NAME}"
+  cp "${CLIENT_NAME}.conf" "$PHOBOS_DIR/${CLIENT_NAME}.conf"
+  chmod 600 "$PHOBOS_DIR/${CLIENT_NAME}.conf"
 
-  printf '%s' "${WG_CONF_NAME}" > "$PHOBOS_DIR/${OBF_CONF_NAME%.conf}.link"
+  printf '%s' "${CLIENT_NAME}" > "$PHOBOS_DIR/${OBF_CONF_NAME%.conf}.link"
 
   if [ "$OBF_BINARY_NAME" != "wg-obfuscator" ]; then
     local used_ports=""
@@ -119,14 +119,14 @@ setup_configs() {
     done
 
     sed -i "s/^source-lport = [0-9]*/source-lport = ${new_port}/" "$PHOBOS_DIR/${OBF_CONF_NAME}"
-    sed -i "s/^Endpoint = 127\.0\.0\.1:[0-9]*/Endpoint = 127.0.0.1:${new_port}/" "$PHOBOS_DIR/${WG_CONF_NAME}"
+    sed -i "s/^Endpoint = 127\.0\.0\.1:[0-9]*/Endpoint = 127.0.0.1:${new_port}/" "$PHOBOS_DIR/${CLIENT_NAME}.conf"
 
     log "  Назначен локальный порт obfuscator: $new_port"
   fi
 
   log "Конфигурации установлены:"
   log "  - Obfuscator: $PHOBOS_DIR/${OBF_CONF_NAME}"
-  log "  - WireGuard: $PHOBOS_DIR/${WG_CONF_NAME}"
+  log "  - WireGuard: $PHOBOS_DIR/${CLIENT_NAME}.conf"
 }
 
 deploy_lib_client() {
@@ -188,7 +188,7 @@ run_3xui_integration() {
     fi
   done
 
-  local wg_config="$PHOBOS_DIR/${WG_CONF_NAME}"
+  local wg_config="$PHOBOS_DIR/${CLIENT_NAME}.conf"
 
   if [ ! -f "$wg_config" ]; then
     log "ОШИБКА: Конфигурация WireGuard не найдена: $wg_config"
@@ -253,7 +253,6 @@ configure_wireguard_openwrt() {
 
   if ./router-configure-wireguard-openwrt.sh \
       --client-name "$CLIENT_NAME" \
-      --interface-name "$OBF_WG_IFACE" \
       --client-private-key "$WG_PRIVATE_KEY" \
       --client-ip "$CLIENT_IP" \
       --client-ipv6 "$CLIENT_IPV6" \
@@ -261,7 +260,7 @@ configure_wireguard_openwrt() {
       --endpoint-port "$WG_ENDPOINT_PORT" \
       --keepalive 25 \
       --mtu 1420 \
-      --fallback-config "$PHOBOS_DIR/${WG_CONF_NAME}"; then
+      --fallback-config "$PHOBOS_DIR/${CLIENT_NAME}.conf"; then
 
     return 0
   else
@@ -272,7 +271,7 @@ configure_wireguard_openwrt() {
 extract_wireguard_params() {
   log "Извлечение параметров WireGuard из конфигурации..."
 
-  local config_file="$PHOBOS_DIR/${WG_CONF_NAME}"
+  local config_file="$PHOBOS_DIR/${CLIENT_NAME}.conf"
 
   WG_PRIVATE_KEY=$(grep '^PrivateKey' "$config_file" | cut -d'=' -f2- | tr -d ' \t\n\r')
   WG_ADDRESS=$(grep '^Address' "$config_file" | cut -d'=' -f2- | tr -d ' \t\n\r')
@@ -317,7 +316,6 @@ configure_wireguard_rci() {
 
   if ./router-configure-wireguard.sh \
       --client-name "$CLIENT_NAME" \
-      --interface-name "$OBF_WG_IFACE" \
       --client-private-key "$WG_PRIVATE_KEY" \
       --client-ip "$CLIENT_IP" \
       --client-ipv6 "$CLIENT_IPV6" \
@@ -325,7 +323,7 @@ configure_wireguard_rci() {
       --endpoint-port "$WG_ENDPOINT_PORT" \
       --keepalive 25 \
       --mtu 1420 \
-      --fallback-config "$PHOBOS_DIR/${WG_CONF_NAME}"; then
+      --fallback-config "$PHOBOS_DIR/${CLIENT_NAME}.conf"; then
 
     return 0
   else
@@ -351,7 +349,7 @@ show_manual_instructions() {
     log "3. Выберите 'Загрузить конфигурацию из файла' в разделе 'WireGuard'"
     log ""
     log "4. Укажите путь к файлу:"
-    log "   $PHOBOS_DIR/${WG_CONF_NAME}"
+    log "   $PHOBOS_DIR/${CLIENT_NAME}.conf"
     log ""
     log "5. Активируйте подключение"
   elif [ "$ROUTER_PLATFORM" = "openwrt" ]; then
@@ -363,7 +361,7 @@ show_manual_instructions() {
     log "3. Создайте новый интерфейс с протоколом WireGuard"
     log ""
     log "4. Используйте параметры из файла:"
-    log "   $PHOBOS_DIR/${WG_CONF_NAME}"
+    log "   $PHOBOS_DIR/${CLIENT_NAME}.conf"
     log ""
     log "5. Настройте файрволл зону для интерфейса"
   fi
@@ -388,7 +386,7 @@ show_final_info() {
   fi
 
   log "  Конфиг obfuscator: $PHOBOS_DIR/${OBF_CONF_NAME}"
-  log "  Конфиг WireGuard: $PHOBOS_DIR/${WG_CONF_NAME}"
+  log "  Конфиг WireGuard: $PHOBOS_DIR/${CLIENT_NAME}.conf"
 
   if [ "$ROUTER_PLATFORM" = "keenetic" ] || [ -f /opt/etc/init.d/${OBF_INIT_NAME} ]; then
     log "  Init-скрипт: /opt/etc/init.d/${OBF_INIT_NAME}"
@@ -542,14 +540,14 @@ main() {
         log "╚════════════════════════════════════════════════════════════╝"
         log ""
         log "Файлы установки:"
-        log "  Бинарник: /usr/local/bin/${OBF_BINARY_NAME}"
-        log "  Конфиг obfuscator: $PHOBOS_DIR/${OBF_CONF_NAME}"
-        log "  Конфиг WireGuard: $PHOBOS_DIR/${WG_CONF_NAME}"
+        log "  Бинарник: /usr/local/bin/wg-obfuscator"
+        log "  Конфиг obfuscator: $PHOBOS_DIR/wg-obfuscator.conf"
+        log "  Конфиг WireGuard: $PHOBOS_DIR/${CLIENT_NAME}.conf"
         log "  Скрипт 3xui.sh: $PHOBOS_DIR/3xui.sh"
-        log "  Systemd service: /etc/systemd/system/${OBF_SERVICE_NAME}.service"
+        log "  Systemd service: /etc/systemd/system/phobos-obfuscator.service"
         log ""
         log "Управление:"
-        log "  systemctl status ${OBF_SERVICE_NAME}         # Проверить что obfuscator запущен"
+        log "  systemctl status phobos-obfuscator         # Проверить что obfuscator запущен"
         log ""
         log "Примечание:"
         log "  WireGuard управляется через 3x-ui панель"

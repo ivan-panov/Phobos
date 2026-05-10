@@ -38,7 +38,6 @@ action_add() {
 
   local server_pub="$SERVER_WG_PUBLIC_KEY"
   local server_ip_v4="${SERVER_PUBLIC_IP_V4:-}"
-  local server_endpoint="${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}"
   local server_ip_v6="${SERVER_PUBLIC_IP_V6:-}"
   
   local client_ip_v4="$manual_ip"
@@ -78,9 +77,7 @@ action_add() {
   local oct4=$(echo "$client_ip_v4" | cut -d. -f4)
   local hex_part=$(printf "%x:%x" "$oct3" "$oct4")
   local client_ip_v6=""
-  if [[ "${PHOBOS_IPV6_ENABLED:-0}" == "1" && -n "$server_ip_v6" ]]; then
-    client_ip_v6="${ipv6_prefix_main}::${hex_part}"
-  fi
+  [[ -n "$server_ip_v6" ]] && client_ip_v6="${ipv6_prefix_main}::${hex_part}"
   
   log_info "Назначен IP: $client_ip_v4 $([[ -n $client_ip_v6 ]] && echo "/ $client_ip_v6")"
   
@@ -117,7 +114,7 @@ EOF
 [instance]
 source-if = 127.0.0.1
 source-lport = ${CLIENT_WG_PORT:-13255}
-target = ${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}:${OBFUSCATOR_PORT:-51821}
+target = $SERVER_PUBLIC_IP_V4:${OBFUSCATOR_PORT:-51821}
 key = ${OBFUSCATOR_KEY:-KEY}
 masking = ${OBFUSCATOR_MASKING:-AUTO}
 verbose = INFO
@@ -138,7 +135,6 @@ EOF
   "obfuscator_dummy": "${OBFUSCATOR_DUMMY:-4}",
   "obfuscator_idle": "${OBFUSCATOR_IDLE:-300}",
   "server_ip_v4": "$SERVER_PUBLIC_IP_V4",
-  "server_endpoint": "${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}",
   "server_port": "${OBFUSCATOR_PORT:-}"
 }
 EOF
@@ -256,7 +252,7 @@ action_check() {
     return 1
   fi
 
-  local client_server_ip=$(jq -r '.server_endpoint // .server_ip_v4 // ""' "$dir/metadata.json")
+  local client_server_ip=$(jq -r '.server_ip_v4 // ""' "$dir/metadata.json")
   local client_obf_key=$(jq -r '.obfuscator_key // ""' "$dir/metadata.json")
   local client_obf_port=$(jq -r '.server_port // ""' "$dir/metadata.json")
   local client_obf_dummy=$(jq -r '.obfuscator_dummy // "4"' "$dir/metadata.json")
@@ -267,7 +263,7 @@ action_check() {
     client_wg_pubkey=$(grep "^PublicKey" "$dir/${id}.conf" | cut -d'=' -f2- | tr -d ' ')
   fi
 
-  [[ "$client_server_ip" != "${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}" ]] && changes+=("Endpoint сервера: $client_server_ip -> ${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}")
+  [[ "$client_server_ip" != "$SERVER_PUBLIC_IP_V4" ]] && changes+=("IP сервера: $client_server_ip -> $SERVER_PUBLIC_IP_V4")
   [[ "$client_obf_key" != "$OBFUSCATOR_KEY" ]] && changes+=("Ключ обфускатора: изменен")
   [[ "$client_obf_port" != "$OBFUSCATOR_PORT" ]] && changes+=("Порт обфускатора: $client_obf_port -> $OBFUSCATOR_PORT")
   [[ "$client_obf_dummy" != "$OBFUSCATOR_DUMMY" ]] && changes+=("Max dummy: изменен")
@@ -308,8 +304,7 @@ action_link() {
   ln -s "$PACKAGES_DIR/phobos-$id.tar.gz" "$link_dir/phobos-$id.tar.gz"
 
   mkdir -p "$WWW_DIR/init"
-  local public_endpoint="${SERVER_PUBLIC_ENDPOINT:-$SERVER_PUBLIC_IP_V4}"
-  local script_url="http://${public_endpoint}:${HTTP_PORT:-80}/packages/$token/phobos-$id.tar.gz"
+  local script_url="http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/packages/$token/phobos-$id.tar.gz"
 
   cat > "$WWW_DIR/init/$token.sh" <<EOF
 #!/bin/sh
@@ -330,18 +325,13 @@ chmod +x install-router.sh
 ./install-router.sh
 EOF
 
-  local cmd="curl -s http://${public_endpoint}:${HTTP_PORT:-80}/init/$token.sh | sh"
-  local wget_cmd="wget -qO- http://${public_endpoint}:${HTTP_PORT:-80}/init/$token.sh | sh"
+  local cmd="curl -s http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/init/$token.sh | sh"
 
   echo ""
   echo "=================================================="
   echo "КОМАНДА ДЛЯ УСТАНОВКИ (Действительна $(($ttl / 3600))ч)"
   echo "=================================================="
   echo "$cmd"
-  echo "или:"
-  echo "$wget_cmd"
-  echo "=================================================="
-  print_required_ports
   echo "=================================================="
   echo ""
 }

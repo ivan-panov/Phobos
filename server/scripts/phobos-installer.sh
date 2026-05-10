@@ -33,58 +33,6 @@ get_obf_params() {
   esac
 }
 
-
-choose_public_endpoint() {
-  local detected_ip="$1"
-  local endpoint="${SERVER_PUBLIC_ENDPOINT:-${PHOBOS_PUBLIC_ENDPOINT:-}}"
-
-  if [[ -n "$endpoint" ]]; then
-    endpoint="$(sanitize_public_endpoint "$endpoint")"
-    if is_valid_public_endpoint "$endpoint"; then
-      echo "$endpoint"
-      return 0
-    fi
-    log_warn "SERVER_PUBLIC_ENDPOINT/PHOBOS_PUBLIC_ENDPOINT имеет неверный формат: $endpoint"
-  fi
-
-  echo "" >&2
-  echo "Какой публичный адрес использовать в клиентских конфигурациях?" >&2
-  echo "  1) IPv4 VPS: ${detected_ip}" >&2
-  echo "  2) Домен, например vpn.example.com" >&2
-  echo "  3) Другой IPv4" >&2
-  read -rp "Выбор [1]: " choice
-  choice="${choice:-1}"
-
-  case "$choice" in
-    2)
-      while true; do
-        read -rp "Введите домен без http:// и без порта: " endpoint
-        endpoint="$(sanitize_public_endpoint "$endpoint")"
-        if is_valid_public_endpoint "$endpoint" && [[ ! "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "$endpoint"
-          return 0
-        fi
-        log_error "Неверный домен. Пример: vpn.example.com"
-      done
-      ;;
-    3)
-      while true; do
-        read -rp "Введите публичный IPv4 VPS: " endpoint
-        endpoint="$(sanitize_public_endpoint "$endpoint")"
-        if [[ "$endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "$endpoint"
-          return 0
-        fi
-        log_error "Неверный IPv4. Пример: 89.125.122.115"
-      done
-      ;;
-    *)
-      echo "$detected_ip"
-      return 0
-      ;;
-  esac
-}
-
 log_info "Остановка существующих служб Phobos..."
 systemctl stop wg-obfuscator 2>/dev/null || true
 systemctl stop phobos-http 2>/dev/null || true
@@ -103,129 +51,17 @@ spin() {
   printf "\r"
 }
 
-show_apt_tail() {
-  local log_file="$1"
-  if [[ -f "$log_file" ]]; then
-    echo "" >&2
-    log_error "Последние строки apt-лога ($log_file):"
-    tail -n 40 "$log_file" >&2 || true
-  fi
-}
-
-
-wait_for_apt_locks() {
-  local waited=0
-  local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
-  while true; do
-    local busy=0
-    local lock
-    for lock in "${locks[@]}"; do
-      if fuser "$lock" >/dev/null 2>&1; then
-        busy=1
-        break
-      fi
-    done
-    [[ "$busy" -eq 0 ]] && return 0
-    if (( waited >= 300 )); then
-      log_warn "apt/dpkg lock занят больше 5 минут. Продолжаю попытку, apt сам вернет ошибку если lock не освободился."
-      return 0
-    fi
-    log_warn "Жду apt/dpkg lock... ${waited}s"
-    sleep 5
-    waited=$((waited + 5))
-  done
-}
-
-_collect_child_pids() {
-  local parent="$1"
-  local child
-  pgrep -P "$parent" 2>/dev/null | while read -r child; do
-    [[ -z "$child" ]] && continue
-    echo "$child"
-    _collect_child_pids "$child"
-  done
-}
-
-run_apt_logged() {
-  local max_seconds="$1"
-  local log_file="$2"
-  local label="$3"
-  shift 3
-
-  : > "$log_file"
-  log_info "apt log: $log_file"
-  "$@" >>"$log_file" 2>&1 &
-  local pid=$!
-  local started
-  started=$(date +%s)
-  local last_line=""
-  local last_report=0
-
-  while kill -0 "$pid" 2>/dev/null; do
-    local now elapsed p stat current_line
-    now=$(date +%s)
-    elapsed=$((now - started))
-
-    for p in $pid $(_collect_child_pids "$pid"); do
-      stat=$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ' || true)
-      if [[ "$stat" == T* ]]; then
-        log_warn "$label: процесс $p был остановлен (STAT=T), возобновляю kill -CONT."
-        kill -CONT "$p" 2>/dev/null || true
-      fi
-    done
-
-    if (( elapsed > max_seconds )); then
-      log_error "$label: таймаут ${max_seconds}s. Останавливаю процесс."
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 3
-      kill -KILL "$pid" 2>/dev/null || true
-      show_apt_tail "$log_file"
-      return 124
-    fi
-
-    if (( now - last_report >= 5 )); then
-      current_line=$(grep -v '^$' "$log_file" | tail -n 1 || true)
-      if [[ -n "$current_line" && "$current_line" != "$last_line" ]]; then
-        log_info "apt: $current_line"
-        last_line="$current_line"
-      else
-        log_info "apt: $label... ${elapsed}s"
-      fi
-      last_report=$now
-    fi
-    sleep 1
-  done
-
-  wait "$pid"
-}
-
 step_deps() {
   log_info "Установка зависимостей..."
-
-  local apt_log="/tmp/phobos-install-apt.log"
-  : > "$apt_log"
-
-  export DEBIAN_FRONTEND=noninteractive
-  export NEEDRESTART_MODE=a
-  export APT_LISTCHANGES_FRONTEND=none
-
-  wait_for_apt_locks
-  if ! run_apt_logged 600 "$apt_log" "apt-get update" \
-      apt-get -o Acquire::ForceIPv4=true update -q; then
-    show_apt_tail "$apt_log"
-    die "apt-get update не завершился. Проверьте интернет, DNS, apt lock или IPv4 маршрутизацию."
-  fi
-
-  wait_for_apt_locks
-  if ! run_apt_logged 900 "$apt_log" "apt-get install dependencies" \
-      apt-get -o Acquire::ForceIPv4=true install -y -q \
-      -o Dpkg::Options::=--force-confdef \
-      -o Dpkg::Options::=--force-confold \
-      wireguard jq curl build-essential ufw; then
-    show_apt_tail "$apt_log"
-    die "Не удалось установить зависимости. Подробности выше и в $apt_log"
-  fi
-
+  (
+    apt-get update -qq \
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard jq curl build-essential ufw iptables nftables
+  ) >/dev/null 2>&1 &
+  spin $! "Установка пакетов..."
+  wait $!
+  local apt_st=$?
+  [[ $apt_st -eq 0 ]] || die "Установка пакетов завершилась с ошибкой (код $apt_st). Запустите: apt-get update && apt-get install -y wireguard iptables nftables"
+  command -v wg >/dev/null 2>&1 || die "Команда wg не найдена после установки wireguard-tools"
   log_success "Зависимости установлены."
 }
 
@@ -273,64 +109,158 @@ step_build() {
   log_success "darkhttpd собран и установлен"
 }
 
+load_netfilter_wireguard_modules() {
+  local mod
+  for mod in wireguard iptable_nat iptable_filter ip_tables ip6_tables ip6table_filter ip6table_nat \
+    nf_tables nf_nat nf_nat_ipv6 nft_nat nft_chain_nat nf_conntrack \
+    xt_MASQUERADE nf_defrag_ipv4 nf_defrag_ipv6; do
+    modprobe "$mod" 2>/dev/null || true
+  done
+}
+
+ensure_ip6tables_nat() {
+  if ip6tables -t nat -S >/dev/null 2>&1; then
+    return 0
+  fi
+  load_netfilter_wireguard_modules
+  if ip6tables -t nat -S >/dev/null 2>&1; then
+    return 0
+  fi
+  log_info "Настройка ip6tables NAT: доустановка пакетов и повторная проверка..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables nftables >/dev/null 2>&1 || true
+  load_netfilter_wireguard_modules
+  ip6tables -t nat -S >/dev/null 2>&1
+}
+
 step_wg() {
   log_info "Настройка WireGuard..."
   mkdir -p /etc/wireguard
 
-  local priv=$(wg genkey)
-  local pub=$(echo "$priv" | wg pubkey)
+  local iface
+  iface=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+  [[ -z "$iface" ]] && iface=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+  [[ -z "$iface" || ! -d "/sys/class/net/$iface" ]] && die "Не удалось определить интерфейс для NAT (нужен default route)"
+
+  load_netfilter_wireguard_modules
+
+  local priv pub
+  priv=$(wg genkey) || die "Не удалось сгенерировать приватный ключ WireGuard"
+  pub=$(printf '%s\n' "$priv" | wg pubkey) || die "Не удалось получить публичный ключ WireGuard"
+
   local wg_ipv4_net="10.25.0.0/16"
   local wg_ipv6_net="fd00:10:25::/48"
   local wg_ipv4_addr="10.25.0.1/16"
   local wg_ipv6_addr="fd00:10:25::1/48"
-  local pub_ip_v6=""
-  pub_ip_v6=$(get_public_ipv6 2>/dev/null || true)
-  local ipv6_enabled=0
-  [[ -n "$pub_ip_v6" ]] && ipv6_enabled=1
+
+  local ipv6_on=0
+  if [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]] && [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" == "0" ]]; then
+    ipv6_on=1
+  fi
+
+  local ipv6_nat=0
+  if [[ "$ipv6_on" -eq 1 ]]; then
+    if ensure_ip6tables_nat; then
+      ipv6_nat=1
+    else
+      log_warn "Таблица ip6tables nat недоступна после установки пакетов и загрузки модулей; IPv6 NAT в PostUp не добавляется"
+    fi
+  fi
+
+  local addr_line="Address = $wg_ipv4_addr"
+  [[ "$ipv6_on" -eq 1 ]] && addr_line+=", $wg_ipv6_addr"
+
+  local iface_q
+  iface_q=$(printf '%q' "$iface")
+
+  mkdir -p "$PHOBOS_DIR/server"
+  cat > "$PHOBOS_DIR/server/wg0-fw.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+WAN_IFACE=${iface_q}
+IPV6_ON=${ipv6_on}
+IPV6_NAT=${ipv6_nat}
+
+load_mods() {
+  local m
+  for m in wireguard iptable_nat iptable_filter ip_tables ip6_tables ip6table_filter ip6table_nat \\
+    nf_tables nf_nat nf_nat_ipv6 nft_nat nft_chain_nat xt_MASQUERADE nf_conntrack nf_defrag_ipv4 nf_defrag_ipv6; do
+    modprobe "\$m" 2>/dev/null || true
+  done
+}
+
+case "\${1:-}" in
+  up)
+    load_mods
+    iptables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || iptables -A FORWARD -i wg0 -o wg0 -j DROP
+    iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -j ACCEPT
+    iptables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+    if [[ "\$IPV6_ON" -eq 1 ]]; then
+      ip6tables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || ip6tables -A FORWARD -i wg0 -o wg0 -j DROP
+      ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i wg0 -j ACCEPT
+      if [[ "\$IPV6_NAT" -eq 1 ]]; then
+        ip6tables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+      fi
+    fi
+    ;;
+  down)
+    iptables -D FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || true
+    iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+    if [[ "\$IPV6_ON" -eq 1 ]]; then
+      ip6tables -D FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || true
+      ip6tables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
+      if [[ "\$IPV6_NAT" -eq 1 ]]; then
+        ip6tables -t nat -D POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+      fi
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  chmod 700 "$PHOBOS_DIR/server/wg0-fw.sh"
 
   cat > "$SERVER_ENV" <<EOF
 SERVER_WG_PRIVATE_KEY=$priv
 SERVER_WG_PUBLIC_KEY=$pub
 SERVER_WG_IPV4_NETWORK=$wg_ipv4_net
 SERVER_WG_IPV6_NETWORK=$wg_ipv6_net
-PHOBOS_IPV6_ENABLED=$ipv6_enabled
 EOF
-
-  local iface=$(ip route | grep default | awk '{print $5}' | head -1)
-  local address_line="$wg_ipv4_addr"
-  local postup="iptables -A FORWARD -i wg0 -o wg0 -j DROP; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE"
-  local postdown="iptables -D FORWARD -i wg0 -o wg0 -j DROP; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE"
-
-  if [[ "$ipv6_enabled" == "1" ]]; then
-    address_line="$wg_ipv4_addr, $wg_ipv6_addr"
-    postup="$postup; ip6tables -A FORWARD -i wg0 -o wg0 -j DROP; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o $iface -j MASQUERADE"
-    postdown="$postdown; ip6tables -D FORWARD -i wg0 -o wg0 -j DROP; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o $iface -j MASQUERADE"
-    log_info "IPv6 обнаружен ($pub_ip_v6) — включаю IPv6 в WireGuard"
-  else
-    log_warn "Публичный IPv6 не обнаружен — WireGuard будет настроен только на IPv4"
-  fi
 
   cat > "$WG_CONFIG" <<EOF
 [Interface]
-Address = $address_line
+$addr_line
 ListenPort = 51820
 PrivateKey = $priv
-PostUp = $postup
-PostDown = $postdown
+PostUp = $PHOBOS_DIR/server/wg0-fw.sh up
+PostDown = $PHOBOS_DIR/server/wg0-fw.sh down
 EOF
   chmod 600 "$WG_CONFIG"
 
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  {
-    echo "net.ipv4.ip_forward=1"
-    if [[ "$ipv6_enabled" == "1" ]]; then
-      echo "net.ipv6.conf.all.forwarding=1"
-    fi
-  } > /etc/sysctl.d/99-phobos.conf
+  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-phobos.conf
+  if [[ "$ipv6_on" -eq 1 ]]; then
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-phobos.conf
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+  fi
   sysctl -p /etc/sysctl.d/99-phobos.conf >/dev/null
 
+  if ! iptables -t nat -S >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables nftables >/dev/null 2>&1 || true
+    load_netfilter_wireguard_modules
+  fi
+  iptables -t nat -S >/dev/null 2>&1 || die "Таблица iptables nat недоступна (модуль iptable_nat или пакет iptables)"
+
+  wg-quick down wg0 2>/dev/null || true
+  ip link delete dev wg0 2>/dev/null || true
+
   systemctl enable wg-quick@wg0
-  systemctl restart wg-quick@wg0
+  if ! systemctl restart wg-quick@wg0; then
+    log_error "Не удалось запустить WireGuard."
+    journalctl -u wg-quick@wg0 -n 50 --no-pager >&2 || true
+    die "См. journalctl -xeu wg-quick@wg0.service"
+  fi
   log_success "WireGuard настроен"
 }
 
@@ -361,13 +291,7 @@ step_obf() {
       log_error "Неверный формат IP, повторите"
     done
   fi
-  local public_endpoint
-  public_endpoint=$(choose_public_endpoint "$pub_ip_v4")
-
-  local pub_ip_v6=""
-  if [[ "${PHOBOS_IPV6_ENABLED:-0}" == "1" ]]; then
-    pub_ip_v6=$(get_public_ipv6 2>/dev/null || true)
-  fi
+  local pub_ip_v6=$(get_public_ipv6)
 
   cat >> "$SERVER_ENV" <<EOF
 OBFUSCATOR_PORT=$port
@@ -376,7 +300,6 @@ OBFUSCATOR_DUMMY=$dummy
 OBFUSCATOR_IDLE=300
 OBFUSCATOR_MASKING=STUN
 SERVER_PUBLIC_IP_V4=$pub_ip_v4
-SERVER_PUBLIC_ENDPOINT=$public_endpoint
 SERVER_PUBLIC_IP_V6=$pub_ip_v6
 WG_LOCAL_ENDPOINT=127.0.0.1:51820
 CLIENT_WG_PORT=13255
@@ -456,8 +379,6 @@ step_final() {
 
   log_info "Установка меню..."
   ln -sf "$REPO_DIR/server/scripts/phobos-menu.sh" /usr/local/bin/phobos
-
-  print_required_ports
 
   log_success "Установка завершена! Запустите 'phobos' для управления системой."
 }

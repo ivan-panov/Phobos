@@ -1,397 +1,394 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 IFS=$'\n\t'
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-source "$SCRIPT_DIR/lib-core.sh"
+PHOBOS_DIR="/opt/Phobos"
+SERVER_DIR="$PHOBOS_DIR/server"
+XRAY_CONFIG="$SERVER_DIR/xray-remnawave.json"
+XRAY_SOURCE_CONFIG="$SERVER_DIR/xray-remnawave-source.json"
+XRAY_ENV="$SERVER_DIR/xray-remnawave.env"
+ROUTING_SCRIPT="$SERVER_DIR/xray-remnawave-routing.sh"
+SERVICE_FILE="/etc/systemd/system/phobos-xray-remnawave.service"
+SERVICE_NAME="phobos-xray-remnawave"
+XRAY_BIN="/usr/local/bin/xray"
+DEFAULT_TPROXY_PORT="12345"
+DEFAULT_MARK="1"
+DEFAULT_TABLE="100"
+DEFAULT_WG_IFACE="wg0"
+DEFAULT_OUTBOUND_TAG="vps2-remnawave"
 
-check_root
-load_env
-ensure_dirs
+log_info() { echo "[INFO] $*"; }
+log_ok() { echo "[OK] $*"; }
+log_warn() { echo "[WARN] $*" >&2; }
+log_err() { echo "[ERROR] $*" >&2; }
+die() { log_err "$*"; exit 1; }
 
-XRAY_CONFIG="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-XRAY_CONFIG_DIR="$(dirname "$XRAY_CONFIG")"
-XRAY_PHOBOS_MANAGED_MARKER="${XRAY_PHOBOS_MANAGED_MARKER:-/usr/local/etc/xray/phobos-managed}"
-XRAY_PHOBOS_INSTALLED_MARKER="${XRAY_PHOBOS_INSTALLED_MARKER:-/usr/local/etc/xray/phobos-installed-by-phobos}"
-XRAY_TPROXY_PORT="${XRAY_TPROXY_PORT:-12345}"
-XRAY_SOCKS_PORT="${XRAY_SOCKS_PORT:-10808}"
-XRAY_MARK="${XRAY_MARK:-1}"
-XRAY_ROUTE_TABLE_ID="${XRAY_ROUTE_TABLE_ID:-100}"
-XRAY_ROUTE_TABLE_NAME="${XRAY_ROUTE_TABLE_NAME:-phobos_xray}"
-XRAY_CLIENT_NET="${XRAY_CLIENT_NET:-${SERVER_WG_IPV4_NETWORK:-10.25.0.0/16}}"
-XRAY_WG_INTERFACE="${XRAY_WG_INTERFACE:-wg0}"
-XRAY_OUTBOUND_TAG="${XRAY_OUTBOUND_TAG:-vps2-remnawave}"
-XRAY_RULE_CHAIN="XRAY_PHOBOS"
-XRAY_DIVERT_CHAIN="XRAY_PHOBOS_DIVERT"
-
-usage() {
-  cat <<USAGE
-Использование: $0 <command>
-
-Команды:
-  setup        Настроить VPS1: Phobos clients -> Xray/Remnawave VPS2
-  apply        Применить TPROXY правила для Phobos-клиентов
-  disable      Отключить Xray/Remnawave-выход и убрать правила
-  status       Показать статус Xray/Remnawave-выхода
-  test         Проверить Xray outbound через локальный SOCKS
-  stabilize    Включить автоперезапуск Xray и watchdog проверки SOCKS
-  watchdog     Одноразовая watchdog-проверка SOCKS и восстановление при сбое
-USAGE
-}
-
-save_env_var() {
-  local key="$1"
-  local value="$2"
-  touch "$SERVER_ENV"
-  if grep -qE "^${key}=" "$SERVER_ENV"; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$SERVER_ENV"
-  else
-    echo "${key}=${value}" >> "$SERVER_ENV"
+require_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    die "Run as root: sudo $0 $*"
   fi
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1
+ensure_dirs() {
+  mkdir -p "$SERVER_DIR"
+  chmod 700 "$SERVER_DIR"
 }
 
-install_deps() {
+install_packages() {
   local missing=()
-  for cmd in curl jq python3 ip iptables; do
-    need_cmd "$cmd" || missing+=("$cmd")
+  for cmd in curl jq ip iptables systemctl python3 base64; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
-
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    if need_cmd apt-get; then
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq python3 iproute2 iptables ca-certificates
-    elif need_cmd dnf; then
-      dnf install -y curl jq python3 iproute iptables ca-certificates
-    elif need_cmd yum; then
-      yum install -y curl jq python3 iproute iptables ca-certificates
-    else
-      die "Не найден apt/dnf/yum. Установите зависимости вручную: ${missing[*]}"
-    fi
-  fi
-}
-
-install_xray_if_needed() {
-  if need_cmd xray; then
+  if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
 
-  log_info "Xray не найден. Устанавливаю Xray-core..."
-  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  if command -v apt-get >/dev/null 2>&1; then
+    log_info "Installing dependencies: ${missing[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq iproute2 iptables systemd python3 coreutils ca-certificates unzip kmod >/dev/null
+  else
+    die "Automatic dependency installation is implemented only for Debian/Ubuntu. Missing: ${missing[*]}"
+  fi
+}
 
-  if ! need_cmd xray; then
-    die "Xray не установился. Проверьте доступ к GitHub и повторите."
+install_xray() {
+  if [[ -x "$XRAY_BIN" ]]; then
+    log_ok "Xray is already installed: $XRAY_BIN"
+    return 0
   fi
 
-  mkdir -p "$XRAY_CONFIG_DIR"
-  touch "$XRAY_PHOBOS_INSTALLED_MARKER"
-  log_info "Xray помечен как установленный Phobos: $XRAY_PHOBOS_INSTALLED_MARKER"
+  log_info "Installing Xray core with the official XTLS installer"
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --without-logfiles
+
+  [[ -x "$XRAY_BIN" ]] || die "Xray binary was not installed at $XRAY_BIN"
+  log_ok "Xray installed"
 }
 
-json_escape_to_file() {
-  local content="$1"
-  local output="$2"
-  printf '%s' "$content" > "$output"
+fetch_subscription() {
+  local sub_url="$1"
+  local out_file="$2"
+  local tmp
+  tmp=$(mktemp)
+
+  log_info "Fetching Remnawave subscription"
+  if ! curl -fsSL \
+      -H 'User-Agent: v2rayN/7 Phobos-Xray-Remnawave' \
+      -H 'Accept: application/json,text/plain,*/*' \
+      "$sub_url" -o "$tmp"; then
+    rm -f "$tmp"
+    die "Failed to fetch subscription URL"
+  fi
+
+  if jq . "$tmp" >/dev/null 2>&1; then
+    cp "$tmp" "$out_file"
+    rm -f "$tmp"
+    log_ok "Subscription returned Xray JSON"
+    return 0
+  fi
+
+  local decoded
+  decoded=$(mktemp)
+  if base64 -d "$tmp" > "$decoded" 2>/dev/null; then
+    if grep -Eq '(vless|vmess|trojan)://' "$decoded"; then
+      cp "$decoded" "$out_file"
+      rm -f "$tmp" "$decoded"
+      log_ok "Subscription returned base64 share links"
+      return 0
+    fi
+  fi
+
+  if grep -Eq '(vless|vmess|trojan)://' "$tmp"; then
+    cp "$tmp" "$out_file"
+    rm -f "$tmp" "$decoded"
+    log_ok "Subscription returned plain share links"
+    return 0
+  fi
+
+  rm -f "$tmp" "$decoded"
+  die "Subscription is neither valid Xray JSON nor supported share links. Use the Remnawave Xray JSON subscription URL, often the /json variant."
 }
 
-parse_vless_url() {
-  local url="$1"
-  python3 - "$url" <<'PY'
+share_uri_to_xray_json() {
+  local source_file="$1"
+  local tag="$2"
+  local first_uri
+  first_uri=$(grep -Eo '(vless|vmess|trojan)://[^[:space:]]+' "$source_file" | head -n 1 || true)
+  [[ -n "$first_uri" ]] || die "No supported share URI found in subscription"
+
+  python3 - "$first_uri" "$tag" <<'PYCONVERT'
+import base64
 import json
 import sys
-from urllib.parse import urlparse, parse_qs, unquote
+import urllib.parse
 
-url = sys.argv[1].strip()
-parsed = urlparse(url)
-if parsed.scheme.lower() != "vless":
-    raise SystemExit("ERROR: поддерживается только vless:// ссылка из Remnawave")
+uri = sys.argv[1]
+tag = sys.argv[2]
 
-query = {k: v[-1] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
-user_id = unquote(parsed.username or "")
-host = parsed.hostname or ""
-port = parsed.port or 443
 
-if not user_id or not host:
-    raise SystemExit("ERROR: не удалось разобрать UUID/host из VLESS ссылки")
+def q(params, key, default=""):
+    return params.get(key, [default])[0]
 
-network = query.get("type") or query.get("network") or "tcp"
-security = query.get("security") or "reality"
-flow = query.get("flow") or ""
-encryption = query.get("encryption") or "none"
 
-result = {
-    "protocol": "vless",
-    "address": host,
-    "port": int(port),
-    "id": user_id,
-    "encryption": encryption,
-    "flow": flow,
-    "network": network,
-    "security": security,
-    "fingerprint": query.get("fp") or query.get("fingerprint") or "chrome",
-    "serverName": query.get("sni") or query.get("serverName") or "",
-    "publicKey": query.get("pbk") or query.get("publicKey") or "",
-    "shortId": query.get("sid") or query.get("shortId") or "",
-    "spiderX": unquote(query.get("spx") or query.get("spiderX") or "/"),
-    "alpn": query.get("alpn") or "",
-    "path": unquote(query.get("path") or "/"),
-    "hostHeader": query.get("host") or "",
-    "serviceName": query.get("serviceName") or "",
-    "allowInsecure": query.get("allowInsecure") or "0",
-}
+def split_list(value):
+    if not value:
+        return []
+    return [x for x in value.split(',') if x]
 
-if security == "reality":
-    missing = [k for k in ("serverName", "publicKey") if not result.get(k)]
-    if missing:
-        raise SystemExit("ERROR: для REALITY не хватает параметров: " + ", ".join(missing))
 
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-build_outbound_json() {
-  local parsed_json="$1"
-  jq -n --argjson p "$parsed_json" --arg tag "$XRAY_OUTBOUND_TAG" '
-    def streamSettings:
-      if $p.network == "tcp" then
-        {
-          "network": "tcp",
-          "security": $p.security
+def add_tls_like_settings(stream, params, kind):
+    sni = q(params, 'sni') or q(params, 'peer') or q(params, 'host')
+    fp = q(params, 'fp') or 'chrome'
+    alpn = split_list(q(params, 'alpn'))
+    if kind == 'reality':
+        stream['realitySettings'] = {
+            'serverName': sni,
+            'fingerprint': fp,
+            'publicKey': q(params, 'pbk'),
+            'shortId': q(params, 'sid'),
+            'spiderX': urllib.parse.unquote(q(params, 'spx') or '/')
         }
-      elif $p.network == "ws" then
-        {
-          "network": "ws",
-          "security": $p.security,
-          "wsSettings": {
-            "path": $p.path,
-            "headers": (if $p.hostHeader != "" then {"Host": $p.hostHeader} else {} end)
-          }
+    elif kind == 'tls':
+        tls = {'serverName': sni, 'fingerprint': fp}
+        if alpn:
+            tls['alpn'] = alpn
+        stream['tlsSettings'] = tls
+
+
+def add_network_settings(stream, params, network):
+    host = q(params, 'host') or q(params, 'sni')
+    path = urllib.parse.unquote(q(params, 'path') or '/')
+    if network == 'ws':
+        settings = {'path': path}
+        if host:
+            settings['headers'] = {'Host': host}
+        stream['wsSettings'] = settings
+    elif network == 'grpc':
+        stream['grpcSettings'] = {'serviceName': q(params, 'serviceName') or q(params, 'service')}
+    elif network in ('xhttp', 'splithttp'):
+        settings = {'path': path}
+        if host:
+            settings['host'] = host
+        mode = q(params, 'mode')
+        if mode:
+            settings['mode'] = mode
+        stream['xhttpSettings'] = settings
+    elif network == 'httpupgrade':
+        settings = {'path': path}
+        if host:
+            settings['host'] = host
+        stream['httpupgradeSettings'] = settings
+    elif network == 'tcp' and (q(params, 'headerType') == 'http'):
+        stream['tcpSettings'] = {
+            'header': {
+                'type': 'http',
+                'request': {
+                    'path': [path],
+                    'headers': {'Host': [host] if host else []}
+                }
+            }
         }
-      elif $p.network == "grpc" then
-        {
-          "network": "grpc",
-          "security": $p.security,
-          "grpcSettings": {"serviceName": $p.serviceName}
-        }
-      else
-        {
-          "network": $p.network,
-          "security": $p.security
-        }
-      end;
 
-    def addSecurity($s):
-      if $p.security == "reality" then
-        $s + {
-          "realitySettings": {
-            "fingerprint": $p.fingerprint,
-            "serverName": $p.serverName,
-            "publicKey": $p.publicKey,
-            "shortId": $p.shortId,
-            "spiderX": $p.spiderX
-          }
-        }
-      elif $p.security == "tls" then
-        $s + {
-          "tlsSettings": {
-            "serverName": $p.serverName,
-            "allowInsecure": ($p.allowInsecure == "1" or $p.allowInsecure == "true")
-          }
-        }
-      else
-        $s
-      end;
 
-    {
-      "tag": $tag,
-      "protocol": "vless",
-      "settings": {
-        "vnext": [
-          {
-            "address": $p.address,
-            "port": $p.port,
-            "users": [
-              {
-                "id": $p.id,
-                "encryption": $p.encryption
-              } + (if $p.flow != "" then {"flow": $p.flow} else {} end)
-            ]
-          }
-        ]
-      },
-      "streamSettings": addSecurity(streamSettings)
-    }
-  '
-}
-
-xray_service_user() {
-  local user
-  user="$(systemctl show -p User --value xray 2>/dev/null || true)"
-  [[ -n "$user" ]] || user="root"
-  echo "$user"
-}
-
-xray_service_group() {
-  local user group
-  user="$(xray_service_user)"
-  group="$(systemctl show -p Group --value xray 2>/dev/null || true)"
-
-  if [[ -z "$group" ]]; then
-    if [[ "$user" == "root" ]]; then
-      group="root"
-    else
-      group="$(id -gn "$user" 2>/dev/null || true)"
-    fi
-  fi
-
-  if [[ -z "$group" ]]; then
-    if getent group nogroup >/dev/null 2>&1; then
-      group="nogroup"
-    elif getent group nobody >/dev/null 2>&1; then
-      group="nobody"
-    else
-      group="root"
-    fi
-  fi
-
-  echo "$group"
-}
-
-fix_xray_config_permissions() {
-  local config_dir service_group
-  config_dir="$(dirname "$XRAY_CONFIG")"
-  service_group="$(xray_service_group)"
-
-  mkdir -p "$config_dir"
-
-  # xray.service in XTLS packages can run as User=nobody.  The config is
-  # written by this root script, so keep root ownership but grant read/execute
-  # to the service group.  Parent directories must remain traversable too.
-  chmod 755 /usr /usr/local /usr/local/etc 2>/dev/null || true
-  chown root:"$service_group" "$config_dir" 2>/dev/null || true
-  chmod 750 "$config_dir" 2>/dev/null || true
-
-  if [[ -f "$XRAY_CONFIG" ]]; then
-    chown root:"$service_group" "$XRAY_CONFIG" 2>/dev/null || true
-    chmod 640 "$XRAY_CONFIG" 2>/dev/null || true
-  fi
-
-  for marker in "$XRAY_PHOBOS_MANAGED_MARKER" "$XRAY_PHOBOS_INSTALLED_MARKER"; do
-    if [[ -f "$marker" ]]; then
-      chown root:"$service_group" "$marker" 2>/dev/null || true
-      chmod 640 "$marker" 2>/dev/null || true
-    fi
-  done
-}
-
-write_xray_config() {
-  local outbound_json="$1"
-  mkdir -p "$(dirname "$XRAY_CONFIG")"
-
-  jq -n \
-    --argjson ob "$outbound_json" \
-    --arg tproxy_port "$XRAY_TPROXY_PORT" \
-    --arg socks_port "$XRAY_SOCKS_PORT" \
-    --arg out_tag "$XRAY_OUTBOUND_TAG" '
-    {
-      "log": {"loglevel": "warning"},
-      "inbounds": [
-        {
-          "tag": "phobos-tproxy",
-          "listen": "0.0.0.0",
-          "port": ($tproxy_port | tonumber),
-          "protocol": "dokodemo-door",
-          "settings": {
-            "network": "tcp,udp",
-            "followRedirect": true
-          },
-          "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls", "quic"]
-          },
-          "streamSettings": {
-            "sockopt": {"tproxy": "tproxy"}
-          }
+if uri.startswith('vmess://'):
+    raw = uri[len('vmess://'):]
+    pad = '=' * (-len(raw) % 4)
+    data = json.loads(base64.urlsafe_b64decode(raw + pad).decode())
+    network = data.get('net') or 'tcp'
+    security = data.get('tls') or 'none'
+    stream = {'network': network, 'security': security}
+    params = {k: [str(v)] for k, v in data.items() if v is not None}
+    add_tls_like_settings(stream, params, security)
+    add_network_settings(stream, params, network)
+    outbound = {
+        'protocol': 'vmess',
+        'tag': tag,
+        'settings': {
+            'vnext': [{
+                'address': data['add'],
+                'port': int(data.get('port') or 443),
+                'users': [{
+                    'id': data['id'],
+                    'alterId': int(data.get('aid') or 0),
+                    'security': data.get('scy') or 'auto'
+                }]
+            }]
         },
-        {
-          "tag": "phobos-socks-test",
-          "listen": "127.0.0.1",
-          "port": ($socks_port | tonumber),
-          "protocol": "socks",
-          "settings": {"udp": true},
-          "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls"]
-          }
+        'streamSettings': stream
+    }
+else:
+    u = urllib.parse.urlparse(uri)
+    params = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+    network = q(params, 'type') or q(params, 'network') or 'tcp'
+    security = q(params, 'security') or 'none'
+    stream = {'network': network, 'security': security}
+    add_tls_like_settings(stream, params, security)
+    add_network_settings(stream, params, network)
+
+    if u.scheme == 'vless':
+        user = {'id': urllib.parse.unquote(u.username or ''), 'encryption': q(params, 'encryption') or 'none'}
+        flow = q(params, 'flow')
+        if flow:
+            user['flow'] = flow
+        outbound = {
+            'protocol': 'vless',
+            'tag': tag,
+            'settings': {'vnext': [{'address': u.hostname, 'port': int(u.port or 443), 'users': [user]}]},
+            'streamSettings': stream
         }
-      ],
-      "outbounds": [
-        $ob,
-        {"tag": "direct", "protocol": "freedom"},
-        {"tag": "block", "protocol": "blackhole"}
-      ],
-      "routing": {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-          {
-            "type": "field",
-            "ip": ["geoip:private"],
-            "outboundTag": "direct"
-          },
-          {
-            "type": "field",
-            "inboundTag": ["phobos-tproxy", "phobos-socks-test"],
-            "outboundTag": $out_tag
-          }
-        ]
+    elif u.scheme == 'trojan':
+        outbound = {
+            'protocol': 'trojan',
+            'tag': tag,
+            'settings': {'servers': [{'address': u.hostname, 'port': int(u.port or 443), 'password': urllib.parse.unquote(u.username or '')}]},
+            'streamSettings': stream
+        }
+    else:
+        raise SystemExit(f'Unsupported URI scheme: {u.scheme}')
+
+config = {
+    'log': {'loglevel': 'warning'},
+    'outbounds': [
+        outbound,
+        {'protocol': 'freedom', 'tag': 'direct'},
+        {'protocol': 'blackhole', 'tag': 'block'}
+    ]
+}
+print(json.dumps(config, ensure_ascii=False, indent=2))
+PYCONVERT
+}
+
+build_tproxy_inbound() {
+  local port="$1"
+  jq -n --argjson port "$port" '{
+    "tag": "phobos-tproxy",
+    "port": $port,
+    "protocol": "dokodemo-door",
+    "settings": {
+      "network": "tcp,udp",
+      "followRedirect": true
+    },
+    "sniffing": {
+      "enabled": true,
+      "destOverride": ["http", "tls", "quic"],
+      "routeOnly": true
+    },
+    "streamSettings": {
+      "sockopt": {
+        "tproxy": "tproxy"
       }
     }
-  ' > "$XRAY_CONFIG"
-
-  cat > "$XRAY_PHOBOS_MANAGED_MARKER" <<EOF_MARKER
-managed_by=phobos
-component=xray-remnawave
-config=$XRAY_CONFIG
-created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-EOF_MARKER
-
-  fix_xray_config_permissions
-  xray run -test -config "$XRAY_CONFIG" >/dev/null
+  }'
 }
 
-ensure_rt_table() {
-  if ! grep -qE "^[[:space:]]*${XRAY_ROUTE_TABLE_ID}[[:space:]]+${XRAY_ROUTE_TABLE_NAME}$" /etc/iproute2/rt_tables 2>/dev/null; then
-    echo "${XRAY_ROUTE_TABLE_ID} ${XRAY_ROUTE_TABLE_NAME}" >> /etc/iproute2/rt_tables
+normalize_xray_config() {
+  local source_file="$1"
+  local tag="$2"
+  local port="$3"
+  local tmp_json
+  tmp_json=$(mktemp)
+
+  if jq . "$source_file" >/dev/null 2>&1; then
+    cp "$source_file" "$tmp_json"
+  else
+    share_uri_to_xray_json "$source_file" "$tag" > "$tmp_json"
   fi
-}
 
-iptables_insert_once() {
-  local table="$1"
-  shift
-  if ! iptables -t "$table" -C "$@" 2>/dev/null; then
-    iptables -t "$table" -A "$@"
+  if ! jq -e 'type == "object" and (.outbounds | type == "array") and ((.outbounds | length) > 0)' "$tmp_json" >/dev/null; then
+    rm -f "$tmp_json"
+    die "Xray JSON must contain a non-empty outbounds array"
   fi
+
+  local first_index
+  first_index=$(jq -r '
+    [.outbounds[] | (.tag // "")] as $tags
+    | [range(0; $tags|length) | select(($tags[.] | test("^(direct|freedom|block|blackhole|dns|api)$"; "i") | not))][0] // 0
+  ' "$tmp_json")
+
+  local tagged
+  tagged=$(mktemp)
+  jq --argjson idx "$first_index" --arg tag "$tag" '
+    .outbounds[$idx].tag = ((.outbounds[$idx].tag // "") | if . == "" then $tag else . end)
+  ' "$tmp_json" > "$tagged"
+
+  local proxy_tag
+  proxy_tag=$(jq -r --argjson idx "$first_index" '.outbounds[$idx].tag' "$tagged")
+  [[ -n "$proxy_tag" && "$proxy_tag" != "null" ]] || proxy_tag="$tag"
+
+  local inbound
+  inbound=$(build_tproxy_inbound "$port")
+
+  jq --argjson inbound "$inbound" --arg proxy_tag "$proxy_tag" '
+    .log = (.log // {"loglevel": "warning"})
+    | .inbounds = ([.inbounds[]? | select((.tag // "") != "phobos-tproxy")] | [$inbound] + .)
+    | .routing = (.routing // {})
+    | .routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")
+    | .routing.rules = ([
+        {"type": "field", "inboundTag": ["phobos-tproxy"], "outboundTag": $proxy_tag}
+      ] + ((.routing.rules // []) | map(select(((.inboundTag // []) | tostring | contains("phobos-tproxy")) | not))))
+  ' "$tagged" > "$XRAY_CONFIG"
+
+  chmod 600 "$XRAY_CONFIG"
+  cp "$source_file" "$XRAY_SOURCE_CONFIG"
+  chmod 600 "$XRAY_SOURCE_CONFIG"
+  rm -f "$tmp_json" "$tagged"
+
+  log_ok "Xray config built: $XRAY_CONFIG"
+  log_ok "Remnawave outbound tag: $proxy_tag"
 }
 
-apply_rules() {
+write_env() {
+  local sub_url="$1"
+  local tag="$2"
+  local tproxy_port="$3"
+  local mark="$4"
+  local table="$5"
+  local wg_iface="$6"
+
+  {
+    printf 'SUBSCRIPTION_URL=%q\n' "$sub_url"
+    printf 'OUTBOUND_TAG=%q\n' "$tag"
+    printf 'TPROXY_PORT=%q\n' "$tproxy_port"
+    printf 'TPROXY_MARK=%q\n' "$mark"
+    printf 'TPROXY_TABLE=%q\n' "$table"
+    printf 'WG_IFACE=%q\n' "$wg_iface"
+  } > "$XRAY_ENV"
+  chmod 600 "$XRAY_ENV"
+}
+
+write_routing_script() {
+  local tproxy_port="$1"
+  local mark="$2"
+  local table="$3"
+  local wg_iface="$4"
+
+  cat > "$ROUTING_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+TPROXY_PORT="$tproxy_port"
+TPROXY_MARK="$mark"
+TPROXY_TABLE="$table"
+WG_IFACE="$wg_iface"
+CHAIN="PHOBOS_XRAY"
+
+add_rule_once() {
+  local table_name="\$1"
+  local chain="\$2"
+  shift 2
+  iptables -t "\$table_name" -C "\$chain" "\$@" 2>/dev/null || iptables -t "\$table_name" -A "\$chain" "\$@"
+}
+
+up() {
+  modprobe xt_TPROXY 2>/dev/null || true
+  modprobe nf_tproxy_ipv4 2>/dev/null || true
+  modprobe iptable_mangle 2>/dev/null || true
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  ensure_rt_table
 
-  ip rule add fwmark "$XRAY_MARK" table "$XRAY_ROUTE_TABLE_NAME" priority 100 2>/dev/null || true
-  ip route replace local 0.0.0.0/0 dev lo table "$XRAY_ROUTE_TABLE_NAME"
+  ip rule add fwmark "\$TPROXY_MARK" table "\$TPROXY_TABLE" 2>/dev/null || true
+  ip route add local 0.0.0.0/0 dev lo table "\$TPROXY_TABLE" 2>/dev/null || true
 
-  iptables -t mangle -N "$XRAY_RULE_CHAIN" 2>/dev/null || true
-  iptables -t mangle -F "$XRAY_RULE_CHAIN"
-  iptables -t mangle -N "$XRAY_DIVERT_CHAIN" 2>/dev/null || true
-  iptables -t mangle -F "$XRAY_DIVERT_CHAIN"
-
-  iptables -t mangle -A "$XRAY_DIVERT_CHAIN" -j MARK --set-mark "$XRAY_MARK"
-  iptables -t mangle -A "$XRAY_DIVERT_CHAIN" -j ACCEPT
-
-  iptables_insert_once mangle PREROUTING -i "$XRAY_WG_INTERFACE" -p tcp -m socket -j "$XRAY_DIVERT_CHAIN"
+  iptables -t mangle -N "\$CHAIN" 2>/dev/null || true
+  iptables -t mangle -F "\$CHAIN"
 
   for cidr in \
     0.0.0.0/8 \
@@ -403,280 +400,183 @@ apply_rules() {
     192.168.0.0/16 \
     224.0.0.0/4 \
     240.0.0.0/4; do
-    iptables -t mangle -A "$XRAY_RULE_CHAIN" -d "$cidr" -j RETURN
+    iptables -t mangle -A "\$CHAIN" -d "\$cidr" -j RETURN
   done
 
-  iptables -t mangle -A "$XRAY_RULE_CHAIN" -p tcp -j TPROXY --on-port "$XRAY_TPROXY_PORT" --tproxy-mark "${XRAY_MARK}/${XRAY_MARK}"
-  iptables -t mangle -A "$XRAY_RULE_CHAIN" -p udp -j TPROXY --on-port "$XRAY_TPROXY_PORT" --tproxy-mark "${XRAY_MARK}/${XRAY_MARK}"
-
-  iptables -t mangle -D PREROUTING -i "$XRAY_WG_INTERFACE" -s "$XRAY_CLIENT_NET" -j "$XRAY_RULE_CHAIN" 2>/dev/null || true
-  iptables -t mangle -A PREROUTING -i "$XRAY_WG_INTERFACE" -s "$XRAY_CLIENT_NET" -j "$XRAY_RULE_CHAIN"
+  iptables -t mangle -A "\$CHAIN" -p tcp -j TPROXY --on-port "\$TPROXY_PORT" --tproxy-mark "\$TPROXY_MARK"
+  iptables -t mangle -A "\$CHAIN" -p udp -j TPROXY --on-port "\$TPROXY_PORT" --tproxy-mark "\$TPROXY_MARK"
+  add_rule_once mangle PREROUTING -i "\$WG_IFACE" -j "\$CHAIN"
 }
 
-remove_rules() {
-  iptables -t mangle -D PREROUTING -i "$XRAY_WG_INTERFACE" -s "$XRAY_CLIENT_NET" -j "$XRAY_RULE_CHAIN" 2>/dev/null || true
-  iptables -t mangle -D PREROUTING -i "$XRAY_WG_INTERFACE" -p tcp -m socket -j "$XRAY_DIVERT_CHAIN" 2>/dev/null || true
-  iptables -t mangle -F "$XRAY_RULE_CHAIN" 2>/dev/null || true
-  iptables -t mangle -X "$XRAY_RULE_CHAIN" 2>/dev/null || true
-  iptables -t mangle -F "$XRAY_DIVERT_CHAIN" 2>/dev/null || true
-  iptables -t mangle -X "$XRAY_DIVERT_CHAIN" 2>/dev/null || true
-  ip rule del fwmark "$XRAY_MARK" table "$XRAY_ROUTE_TABLE_NAME" priority 100 2>/dev/null || true
-  ip route flush table "$XRAY_ROUTE_TABLE_NAME" 2>/dev/null || true
+down() {
+  iptables -t mangle -D PREROUTING -i "\$WG_IFACE" -j "\$CHAIN" 2>/dev/null || true
+  iptables -t mangle -F "\$CHAIN" 2>/dev/null || true
+  iptables -t mangle -X "\$CHAIN" 2>/dev/null || true
+  ip rule del fwmark "\$TPROXY_MARK" table "\$TPROXY_TABLE" 2>/dev/null || true
+  ip route flush table "\$TPROXY_TABLE" 2>/dev/null || true
 }
 
-write_xray_service_override() {
-  mkdir -p /etc/systemd/system/xray.service.d
-  cat > /etc/systemd/system/xray.service.d/phobos-tproxy.conf <<'EOF_XRAY_SERVICE'
-[Service]
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-Restart=always
-RestartSec=3
-EOF_XRAY_SERVICE
-
-  systemctl daemon-reload
+case "\${1:-}" in
+  up) up ;;
+  down) down ;;
+  restart) down; up ;;
+  *) echo "Usage: \$0 {up|down|restart}" >&2; exit 1 ;;
+esac
+EOF
+  chmod 700 "$ROUTING_SCRIPT"
+  log_ok "Routing helper written: $ROUTING_SCRIPT"
 }
 
-write_watchdog_service() {
-  cat > /usr/local/sbin/phobos-xray-remnawave-watchdog.sh <<'EOF_WATCHDOG'
-#!/usr/bin/env bash
-set -u
-
-SERVER_ENV="/opt/Phobos/server/server.env"
-if [[ -f "$SERVER_ENV" ]]; then
-  # shellcheck disable=SC1090
-  source "$SERVER_ENV"
-fi
-
-SOCKS_PORT="${XRAY_SOCKS_PORT:-10808}"
-CHECK_URL="${XRAY_WATCHDOG_URL:-https://ifconfig.me}"
-
-for attempt in 1 2 3; do
-  if curl -4 --connect-timeout 5 --max-time 12 --socks5-hostname "127.0.0.1:${SOCKS_PORT}" -fsS "$CHECK_URL" >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 3
-done
-
-logger -t phobos-xray-remnawave-watchdog "SOCKS check failed on 127.0.0.1:${SOCKS_PORT}; restarting xray and TPROXY rules"
-systemctl restart xray
-systemctl restart phobos-xray-remnawave-rules.service 2>/dev/null || true
-EOF_WATCHDOG
-
-  chmod +x /usr/local/sbin/phobos-xray-remnawave-watchdog.sh
-
-  cat > /etc/systemd/system/phobos-xray-remnawave-watchdog.service <<'EOF_WATCHDOG_SERVICE'
+write_service() {
+  cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Phobos Xray Remnawave watchdog
-After=network-online.target xray.service phobos-xray-remnawave-rules.service
+Description=Phobos Xray route to VPS2 Remnawave
 Wants=network-online.target
+After=network-online.target wg-quick@wg0.service
 
 [Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/phobos-xray-remnawave-watchdog.sh
-EOF_WATCHDOG_SERVICE
-
-  cat > /etc/systemd/system/phobos-xray-remnawave-watchdog.timer <<'EOF_WATCHDOG_TIMER'
-[Unit]
-Description=Run Phobos Xray Remnawave watchdog every minute
-
-[Timer]
-OnBootSec=45
-OnUnitActiveSec=60
-AccuracySec=5
-
-[Install]
-WantedBy=timers.target
-EOF_WATCHDOG_TIMER
-
-  systemctl daemon-reload
-  systemctl enable --now phobos-xray-remnawave-watchdog.timer >/dev/null 2>&1 || true
-}
-
-stabilize() {
-  install_deps
-  write_xray_service_override
-  fix_xray_config_permissions
-  systemctl enable xray >/dev/null 2>&1 || true
-  systemctl restart xray
-  apply_rules
-  write_rules_service
-  systemctl restart phobos-xray-remnawave-rules.service
-  write_watchdog_service
-  log_success "Стабилизация включена: Xray автоперезапускается, watchdog проверяет SOCKS каждые 60 секунд."
-}
-
-watchdog_cmd() {
-  if [[ ! -x /usr/local/sbin/phobos-xray-remnawave-watchdog.sh ]]; then
-    write_watchdog_service
-  fi
-  /usr/local/sbin/phobos-xray-remnawave-watchdog.sh
-}
-
-write_rules_service() {
-  cat > /etc/systemd/system/phobos-xray-remnawave-rules.service <<EOF_SERVICE
-[Unit]
-Description=Phobos Xray Remnawave TPROXY rules
-After=network-online.target wg-quick@${XRAY_WG_INTERFACE}.service xray.service
-Wants=network-online.target
-Requires=xray.service
-
-[Service]
-Type=oneshot
-ExecStart=$SCRIPT_DIR/phobos-xray-remnawave.sh apply
-ExecStop=$SCRIPT_DIR/phobos-xray-remnawave.sh disable-rules-internal
-RemainAfterExit=yes
+Type=simple
+ExecStartPre=$ROUTING_SCRIPT up
+ExecStart=$XRAY_BIN run -config $XRAY_CONFIG
+ExecStopPost=$ROUTING_SCRIPT down
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
-EOF_SERVICE
-
+EOF
   systemctl daemon-reload
-  systemctl enable phobos-xray-remnawave-rules.service >/dev/null 2>&1 || true
+  log_ok "Systemd service written: $SERVICE_FILE"
 }
 
-setup() {
-  local vless_url parsed_json outbound_json
-  echo ""
-  echo "Вставьте VLESS-ссылку пользователя Remnawave для VPS2."
-  echo "Схема должна быть vless://...; лучше VLESS + TCP + REALITY."
-  echo ""
-  read -rp "VLESS URL: " vless_url
-  vless_url="$(echo "$vless_url" | tr -d '\r\n')"
-  [[ -z "$vless_url" ]] && die "VLESS URL пустой."
+test_xray_config() {
+  if [[ -x "$XRAY_BIN" ]]; then
+    log_info "Testing Xray config"
+    "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null
+    log_ok "Xray config test passed"
+  fi
+}
 
-  install_deps
-  install_xray_if_needed
+configure() {
+  local sub_url="$1"
+  local tag="${2:-$DEFAULT_OUTBOUND_TAG}"
+  local tproxy_port="${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
+  local mark="${TPROXY_MARK:-$DEFAULT_MARK}"
+  local table="${TPROXY_TABLE:-$DEFAULT_TABLE}"
+  local wg_iface="${WG_IFACE:-$DEFAULT_WG_IFACE}"
 
-  parsed_json="$(parse_vless_url "$vless_url")" || die "Не удалось разобрать VLESS URL."
-  outbound_json="$(build_outbound_json "$parsed_json")" || die "Не удалось собрать outbound JSON."
-  write_xray_config "$outbound_json" || die "Xray config test failed."
+  [[ -n "$sub_url" ]] || die "Subscription URL is required"
 
-  mkdir -p /etc/systemd/system/xray.service.d
-  write_xray_service_override
+  require_root
+  ensure_dirs
+  install_packages
+  install_xray
+
+  local raw
+  raw=$(mktemp)
+  fetch_subscription "$sub_url" "$raw"
+  normalize_xray_config "$raw" "$tag" "$tproxy_port"
+  rm -f "$raw"
+
+  write_env "$sub_url" "$tag" "$tproxy_port" "$mark" "$table" "$wg_iface"
+  write_routing_script "$tproxy_port" "$mark" "$table" "$wg_iface"
+  write_service
+  test_xray_config
+
+  systemctl enable --now "$SERVICE_NAME"
+  log_ok "Enabled route: Phobos WireGuard clients -> Xray -> VPS2 Remnawave"
+}
+
+refresh() {
+  require_root
+  [[ -f "$XRAY_ENV" ]] || die "No saved configuration. Run: $0 configure <remnawave_subscription_url> [tag]"
+  # shellcheck disable=SC1090
+  source "$XRAY_ENV"
+  local raw
+  raw=$(mktemp)
+  fetch_subscription "$SUBSCRIPTION_URL" "$raw"
+  normalize_xray_config "$raw" "${OUTBOUND_TAG:-$DEFAULT_OUTBOUND_TAG}" "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
+  rm -f "$raw"
+  test_xray_config
+  systemctl restart "$SERVICE_NAME"
+  log_ok "Subscription refreshed and service restarted"
+}
+
+enable_service() {
+  require_root
+  [[ -f "$SERVICE_FILE" ]] || die "Service is not configured. Run configure first."
   systemctl daemon-reload
-  systemctl enable xray >/dev/null 2>&1 || true
-  systemctl restart xray
-
-  apply_rules
-  write_rules_service
-  systemctl restart phobos-xray-remnawave-rules.service
-  write_watchdog_service
-
-  save_env_var PHOBOS_XRAY_REMNAWAVE_ENABLED 1
-  save_env_var PHOBOS_XRAY_REMNAWAVE_ROLE entry
-  save_env_var XRAY_CONFIG "$XRAY_CONFIG"
-  save_env_var XRAY_TPROXY_PORT "$XRAY_TPROXY_PORT"
-  save_env_var XRAY_SOCKS_PORT "$XRAY_SOCKS_PORT"
-  save_env_var XRAY_MARK "$XRAY_MARK"
-  save_env_var XRAY_ROUTE_TABLE_ID "$XRAY_ROUTE_TABLE_ID"
-  save_env_var XRAY_ROUTE_TABLE_NAME "$XRAY_ROUTE_TABLE_NAME"
-  save_env_var XRAY_CLIENT_NET "$XRAY_CLIENT_NET"
-  save_env_var XRAY_WG_INTERFACE "$XRAY_WG_INTERFACE"
-  save_env_var XRAY_OUTBOUND_TAG "$XRAY_OUTBOUND_TAG"
-
-  log_success "VPS1 настроен: клиенты Phobos (${XRAY_CLIENT_NET}) выходят через VPS2 Remnawave/Xray."
-  echo ""
-  echo "Проверка Xray outbound на VPS1:"
-  echo "  $SCRIPT_DIR/phobos-xray-remnawave.sh test"
-  echo ""
-  echo "Проверка с клиента за Keenetic:"
-  echo "  curl -4 ifconfig.me"
-  echo "Должен быть IP VPS2."
+  systemctl enable --now "$SERVICE_NAME"
+  log_ok "Service enabled"
 }
 
-status_cmd() {
-  echo ""
-  echo "PHOBOS XRAY/REMNAWAVE STATUS"
-  echo "-----------------------------"
-  echo "Включено: ${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}"
-  echo "WG интерфейс клиентов: ${XRAY_WG_INTERFACE}"
-  echo "Клиентская сеть: ${XRAY_CLIENT_NET}"
-  echo "Xray config: ${XRAY_CONFIG}"
-  echo "TPROXY порт: ${XRAY_TPROXY_PORT}"
-  echo "SOCKS test порт: 127.0.0.1:${XRAY_SOCKS_PORT}"
-  echo "Таблица маршрутизации: ${XRAY_ROUTE_TABLE_NAME}/${XRAY_ROUTE_TABLE_ID}"
-  echo ""
-  systemctl is-active --quiet xray && echo "xray: RUNNING" || echo "xray: STOPPED"
-  systemctl is-active --quiet phobos-xray-remnawave-rules.service && echo "rules service: RUNNING" || echo "rules service: STOPPED"
-  systemctl is-active --quiet phobos-xray-remnawave-watchdog.timer && echo "watchdog timer: RUNNING" || echo "watchdog timer: STOPPED"
-  echo ""
-  echo "ip rule:"
-  ip rule show | grep -E "fwmark|${XRAY_ROUTE_TABLE_NAME}|${XRAY_ROUTE_TABLE_ID}" || echo "правил нет"
-  echo ""
-  echo "iptables mangle PREROUTING:"
-  iptables -t mangle -S PREROUTING | grep "$XRAY_RULE_CHAIN" || echo "PREROUTING правила нет"
-  echo ""
-  echo "Xray inbound ports:"
-  ss -lntup 2>/dev/null | grep -E ":(${XRAY_TPROXY_PORT}|${XRAY_SOCKS_PORT})\b" || echo "порты не слушаются"
+disable_service() {
+  require_root
+  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  if [[ -x "$ROUTING_SCRIPT" ]]; then
+    "$ROUTING_SCRIPT" down || true
+  fi
+  log_ok "Service disabled and routing rules removed"
 }
 
-test_cmd() {
-  if [[ "${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}" != "1" ]]; then
-    echo "Xray/Remnawave-выход выключен: PHOBOS_XRAY_REMNAWAVE_ENABLED=${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}"
-    echo "Тест не выполняется. Сначала выберите пункт 1: Настроить выход через VPS2 Remnawave."
-    echo ""
-    return 0
+status() {
+  echo "== $SERVICE_NAME =="
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+  echo
+  echo "== saved env =="
+  if [[ -f "$XRAY_ENV" ]]; then
+    sed 's/^SUBSCRIPTION_URL=.*/SUBSCRIPTION_URL=<hidden>/' "$XRAY_ENV"
+  else
+    echo "not configured"
   fi
-
-  if ! need_cmd curl; then
-    if need_cmd apt-get; then
-      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl
-    fi
-  fi
-
-  if ! systemctl is-active --quiet xray; then
-    echo "Xray/Remnawave-выход включён, но сервис xray не запущен."
-    echo "Запустите: systemctl restart xray"
-    echo "Потом проверьте: journalctl -u xray -n 80 --no-pager"
-    echo ""
-    return 1
-  fi
-
-  if ! ss -lnt 2>/dev/null | grep -qE "127\.0\.0\.1:${XRAY_SOCKS_PORT}\b"; then
-    echo "Xray запущен, но SOCKS test порт 127.0.0.1:${XRAY_SOCKS_PORT} не слушается."
-    echo "Проверьте конфиг: xray run -test -config ${XRAY_CONFIG}"
-    echo "Потом проверьте логи: journalctl -u xray -n 80 --no-pager"
-    echo ""
-    return 1
-  fi
-
-  echo "Проверяю IP через Xray SOCKS 127.0.0.1:${XRAY_SOCKS_PORT}..."
-  if ! curl -4 --connect-timeout 10 --max-time 20 --socks5-hostname "127.0.0.1:${XRAY_SOCKS_PORT}" https://ifconfig.me; then
-    echo ""
-    echo "Не удалось выйти через Xray SOCKS. Проверьте доступность VPS2/домен/порт Remnawave и логи xray."
-    echo "journalctl -u xray -n 80 --no-pager"
-    echo ""
-    return 1
-  fi
-  echo ""
+  echo
+  echo "== tproxy rules =="
+  iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || echo "no PHOBOS_XRAY chain"
 }
 
-disable_all() {
-  systemctl stop phobos-xray-remnawave-watchdog.timer 2>/dev/null || true
-  systemctl disable phobos-xray-remnawave-watchdog.timer 2>/dev/null || true
-  systemctl stop phobos-xray-remnawave-rules.service 2>/dev/null || true
-  systemctl disable phobos-xray-remnawave-rules.service 2>/dev/null || true
-  remove_rules
-  save_env_var PHOBOS_XRAY_REMNAWAVE_ENABLED 0
-  log_success "Xray/Remnawave-выход для Phobos отключен. Xray config сохранён: ${XRAY_CONFIG}"
+show_config() {
+  [[ -f "$XRAY_CONFIG" ]] || die "No config at $XRAY_CONFIG"
+  jq . "$XRAY_CONFIG"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  $0 configure <remnawave_subscription_url> [outbound_tag]
+  $0 refresh
+  $0 enable
+  $0 disable
+  $0 status
+  $0 show-config
+
+Environment overrides for configure:
+  TPROXY_PORT=$DEFAULT_TPROXY_PORT TPROXY_MARK=$DEFAULT_MARK TPROXY_TABLE=$DEFAULT_TABLE WG_IFACE=$DEFAULT_WG_IFACE
+EOF
 }
 
 case "${1:-}" in
-  setup) setup ;;
-  apply)
-    if [[ "${PHOBOS_XRAY_REMNAWAVE_ENABLED:-0}" == "1" ]]; then
-      apply_rules
-    else
-      echo "PHOBOS_XRAY_REMNAWAVE_ENABLED != 1, правила не применены."
-    fi
+  configure)
+    shift
+    configure "${1:-}" "${2:-$DEFAULT_OUTBOUND_TAG}"
     ;;
-  disable) disable_all ;;
-  disable-rules-internal) remove_rules ;;
-  status) status_cmd ;;
-  test) test_cmd ;;
-  stabilize) stabilize ;;
-  watchdog) watchdog_cmd ;;
-  help|-h|--help|"") usage ;;
-  *) usage; exit 1 ;;
+  refresh)
+    refresh
+    ;;
+  enable)
+    enable_service
+    ;;
+  disable)
+    disable_service
+    ;;
+  status)
+    status
+    ;;
+  show-config)
+    show_config
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
 esac
