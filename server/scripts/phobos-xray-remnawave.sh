@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 PHOBOS_DIR="/opt/Phobos"
 SERVER_DIR="$PHOBOS_DIR/server"
+SERVER_ENV="$SERVER_DIR/server.env"
 XRAY_CONFIG="$SERVER_DIR/xray-remnawave.json"
 XRAY_SOURCE_CONFIG="$SERVER_DIR/xray-remnawave-source.json"
 XRAY_ENV="$SERVER_DIR/xray-remnawave.env"
@@ -22,6 +23,31 @@ log_ok() { echo "[OK] $*"; }
 log_warn() { echo "[WARN] $*" >&2; }
 log_err() { echo "[ERROR] $*" >&2; }
 die() { log_err "$*"; exit 1; }
+
+save_server_env_var() {
+  local key="$1"
+  local value="$2"
+  mkdir -p "$SERVER_DIR"
+  touch "$SERVER_ENV"
+  if grep -qE "^${key}=" "$SERVER_ENV"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$SERVER_ENV"
+  else
+    echo "${key}=${value}" >> "$SERVER_ENV"
+  fi
+}
+
+enable_vps2_only_mode() {
+  save_server_env_var PHOBOS_VPS2_ONLY 1
+  save_server_env_var PHOBOS_VPS2_MODE xray-remnawave
+
+  local fw_script="$SERVER_DIR/wg0-fw.sh"
+  if [[ -x "$fw_script" ]]; then
+    PHOBOS_VPS2_ONLY=1 "$fw_script" killswitch-up || log_warn "Failed to apply wg0 VPS2-only kill-switch via $fw_script"
+  else
+    log_warn "wg0 firewall helper not found: $fw_script. Re-run the Phobos installer or apply kill-switch manually."
+  fi
+}
+
 
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
@@ -378,11 +404,44 @@ add_rule_once() {
   iptables -t "\$table_name" -C "\$chain" "\$@" 2>/dev/null || iptables -t "\$table_name" -A "\$chain" "\$@"
 }
 
+remove_ipv4_rule() {
+  while iptables "\$@" 2>/dev/null; do :; done
+}
+
+remove_ipv6_rule() {
+  while ip6tables "\$@" 2>/dev/null; do :; done
+}
+
+get_default_iface() {
+  ip -4 route show default | awk '/^default/{print \$5; exit}'
+}
+
+apply_vps2_killswitch() {
+  local wan_iface
+  wan_iface="\$(get_default_iface || true)"
+  [[ -n "\$wan_iface" ]] || return 0
+
+  # Fail closed: packets from Phobos clients must never be forwarded directly
+  # from VPS1 to its public WAN. If Xray/VPS2 is down, connections fail instead
+  # of revealing VPS1 IP.
+  remove_ipv4_rule -D FORWARD -i "\$WG_IFACE" -o "\$wan_iface" -j REJECT --reject-with icmp-net-unreachable
+  iptables -I FORWARD 1 -i "\$WG_IFACE" -o "\$wan_iface" -j REJECT --reject-with icmp-net-unreachable
+
+  # IPv6 TPROXY is intentionally blocked until a real IPv6 VPS2 path exists.
+  if command -v ip6tables >/dev/null 2>&1; then
+    remove_ipv6_rule -D FORWARD -i "\$WG_IFACE" -j REJECT
+    ip6tables -I FORWARD 1 -i "\$WG_IFACE" -j REJECT
+  fi
+}
+
 up() {
   modprobe xt_TPROXY 2>/dev/null || true
   modprobe nf_tproxy_ipv4 2>/dev/null || true
   modprobe iptable_mangle 2>/dev/null || true
+  modprobe xt_REJECT 2>/dev/null || true
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  apply_vps2_killswitch
 
   ip rule add fwmark "\$TPROXY_MARK" table "\$TPROXY_TABLE" 2>/dev/null || true
   ip route add local 0.0.0.0/0 dev lo table "\$TPROXY_TABLE" 2>/dev/null || true
@@ -414,6 +473,8 @@ down() {
   iptables -t mangle -X "\$CHAIN" 2>/dev/null || true
   ip rule del fwmark "\$TPROXY_MARK" table "\$TPROXY_TABLE" 2>/dev/null || true
   ip route flush table "\$TPROXY_TABLE" 2>/dev/null || true
+  # Do not remove the VPS2-only kill-switch here. Service stop/restart must not
+  # create a direct VPS1 fallback window.
 }
 
 case "\${1:-}" in
@@ -483,9 +544,11 @@ configure() {
   write_routing_script "$tproxy_port" "$mark" "$table" "$wg_iface"
   write_service
   test_xray_config
+  enable_vps2_only_mode
 
   systemctl enable --now "$SERVICE_NAME"
   log_ok "Enabled route: Phobos WireGuard clients -> Xray -> VPS2 Remnawave"
+  log_ok "VPS2-only kill-switch enabled: VPS1 will not forward Phobos clients directly to WAN"
 }
 
 refresh() {
@@ -507,8 +570,10 @@ enable_service() {
   require_root
   [[ -f "$SERVICE_FILE" ]] || die "Service is not configured. Run configure first."
   systemctl daemon-reload
+  enable_vps2_only_mode
   systemctl enable --now "$SERVICE_NAME"
   log_ok "Service enabled"
+  log_ok "VPS2-only kill-switch enabled"
 }
 
 disable_service() {
@@ -518,6 +583,7 @@ disable_service() {
     "$ROUTING_SCRIPT" down || true
   fi
   log_ok "Service disabled and routing rules removed"
+  log_warn "VPS2-only kill-switch is intentionally kept so clients cannot leak via VPS1 WAN"
 }
 
 status() {
@@ -533,6 +599,10 @@ status() {
   echo
   echo "== tproxy rules =="
   iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || echo "no PHOBOS_XRAY chain"
+  echo
+  echo "== VPS2-only kill-switch =="
+  iptables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv4 kill-switch rule not found"
+  ip6tables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv6 kill-switch rule not found or IPv6 disabled"
 }
 
 show_config() {

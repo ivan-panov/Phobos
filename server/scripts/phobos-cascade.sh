@@ -46,6 +46,21 @@ save_env_var() {
   fi
 }
 
+
+enable_vps2_only_mode() {
+  local exit_iface="${1:-$CASCADE_IFACE}"
+  save_env_var PHOBOS_VPS2_ONLY 1
+  save_env_var PHOBOS_VPS2_MODE cascade
+  save_env_var PHOBOS_EXIT_IFACE "$exit_iface"
+
+  local fw_script="$PHOBOS_DIR/server/wg0-fw.sh"
+  if [[ -x "$fw_script" ]]; then
+    PHOBOS_VPS2_ONLY=1 PHOBOS_EXIT_IFACE="$exit_iface" "$fw_script" killswitch-up || log_warn "Не удалось применить kill-switch через $fw_script"
+  else
+    log_warn "Не найден $fw_script. Kill-switch будет добавлен в PostUp каскада, но лучше переустановить Phobos для постоянного wg0-fw.sh."
+  fi
+}
+
 ensure_cascade_keys() {
   local private_key_file="$CASCADE_DIR/${CASCADE_IFACE}.private"
   local public_key_file="$CASCADE_DIR/${CASCADE_IFACE}.public"
@@ -153,7 +168,7 @@ CFG
 }
 
 configure_entry() {
-  local private_key exit_public_key exit_host exit_port
+  local private_key exit_public_key exit_host exit_port entry_wan_iface
   private_key="$(get_private_key)"
 
   echo ""
@@ -168,6 +183,8 @@ configure_entry() {
   read -rp "UDP порт каскада на VPS2 [${CASCADE_PORT}]: " exit_port
   exit_port="${exit_port:-$CASCADE_PORT}"
   exit_public_key="$(prompt_non_empty "Вставьте публичный ключ VPS2 exit-node: ")"
+  entry_wan_iface="$(get_default_iface)"
+  [[ -z "$entry_wan_iface" ]] && die "Не удалось определить WAN-интерфейс VPS1 для kill-switch."
 
   ensure_rt_table
 
@@ -176,7 +193,7 @@ configure_entry() {
 Address = ${CASCADE_ENTRY_IP}/30
 PrivateKey = ${private_key}
 Table = off
-PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null; ip rule add from ${CASCADE_CLIENT_NET} table ${CASCADE_TABLE_NAME} priority 1077 2>/dev/null || true; ip route replace default dev %i table ${CASCADE_TABLE_NAME}; iptables -C FORWARD -i wg0 -o %i -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -o %i -j ACCEPT; iptables -C FORWARD -i %i -o wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i %i -o wg0 -j ACCEPT
+PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null; iptables -D FORWARD -i wg0 -o ${entry_wan_iface} -j REJECT --reject-with icmp-net-unreachable 2>/dev/null || true; iptables -I FORWARD 1 -i wg0 -o ${entry_wan_iface} -j REJECT --reject-with icmp-net-unreachable; ip6tables -D FORWARD -i wg0 -j REJECT 2>/dev/null || true; ip6tables -I FORWARD 1 -i wg0 -j REJECT 2>/dev/null || true; ip rule add from ${CASCADE_CLIENT_NET} table ${CASCADE_TABLE_NAME} priority 1077 2>/dev/null || true; ip route replace default dev %i table ${CASCADE_TABLE_NAME}; iptables -C FORWARD -i wg0 -o %i -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -o %i -j ACCEPT; iptables -C FORWARD -i %i -o wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i %i -o wg0 -j ACCEPT
 PostDown = ip rule del from ${CASCADE_CLIENT_NET} table ${CASCADE_TABLE_NAME} priority 1077 2>/dev/null || true; ip route flush table ${CASCADE_TABLE_NAME} 2>/dev/null || true; iptables -D FORWARD -i wg0 -o %i -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -i %i -o wg0 -j ACCEPT 2>/dev/null || true
 
 [Peer]
@@ -192,6 +209,7 @@ CFG
     echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
   fi
 
+  enable_vps2_only_mode "$CASCADE_IFACE"
   restart_cascade
 
   save_env_var PHOBOS_CASCADE_ENABLED 1
@@ -202,6 +220,9 @@ CFG
   save_env_var CASCADE_CLIENT_NET "$CASCADE_CLIENT_NET"
   save_env_var CASCADE_TABLE_ID "$CASCADE_TABLE_ID"
   save_env_var CASCADE_TABLE_NAME "$CASCADE_TABLE_NAME"
+  save_env_var PHOBOS_VPS2_ONLY 1
+  save_env_var PHOBOS_VPS2_MODE cascade
+  save_env_var PHOBOS_EXIT_IFACE "$CASCADE_IFACE"
 
   log_success "VPS1 entry-node настроен и запущен."
   echo "Клиенты Phobos теперь маршрутизируются через VPS2 по правилу: from ${CASCADE_CLIENT_NET} table ${CASCADE_TABLE_NAME}"
@@ -239,6 +260,11 @@ status_cascade() {
   ip route show table "$CASCADE_TABLE_NAME" 2>/dev/null || true
 
   echo ""
+  echo "Kill-switch VPS2-only:"
+  iptables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i wg0 .* -j REJECT" || echo "IPv4 kill-switch rule not found"
+  ip6tables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i wg0 .* -j REJECT" || echo "IPv6 kill-switch rule not found or IPv6 disabled"
+
+  echo ""
   echo "Проверка туннеля:"
   if ping -c 2 -W 2 "$CASCADE_EXIT_IP" >/dev/null 2>&1 || ping -c 2 -W 2 "$CASCADE_ENTRY_IP" >/dev/null 2>&1; then
     echo "ping peer: OK"
@@ -258,6 +284,7 @@ disable_cascade() {
   save_env_var PHOBOS_CASCADE_ROLE off
 
   log_success "Каскад отключен. Ключи сохранены в ${CASCADE_DIR}. Конфиг оставлен: ${CASCADE_CONFIG}"
+  log_warn "VPS2-only kill-switch намеренно оставлен включенным: VPS1 не будет выпускать клиентов напрямую в WAN."
 }
 
 case "${1:-}" in

@@ -179,26 +179,77 @@ set -euo pipefail
 WAN_IFACE=${iface_q}
 IPV6_ON=${ipv6_on}
 IPV6_NAT=${ipv6_nat}
+PHOBOS_DIR="/opt/Phobos"
+SERVER_ENV="\$PHOBOS_DIR/server/server.env"
+
+if [[ -f "\$SERVER_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "\$SERVER_ENV"
+fi
+
+PHOBOS_VPS2_ONLY="\${PHOBOS_VPS2_ONLY:-0}"
+PHOBOS_EXIT_IFACE="\${PHOBOS_EXIT_IFACE:-\${CASCADE_WG_INTERFACE:-wg-exit}}"
 
 load_mods() {
   local m
-  for m in wireguard iptable_nat iptable_filter ip_tables ip6_tables ip6table_filter ip6table_nat \\
-    nf_tables nf_nat nf_nat_ipv6 nft_nat nft_chain_nat xt_MASQUERADE nf_conntrack nf_defrag_ipv4 nf_defrag_ipv6; do
+  for m in wireguard iptable_nat iptable_filter iptable_mangle ip_tables ip6_tables ip6table_filter ip6table_nat \
+    nf_tables nf_nat nf_nat_ipv6 nft_nat nft_chain_nat xt_MASQUERADE xt_REJECT nf_conntrack nf_defrag_ipv4 nf_defrag_ipv6; do
     modprobe "\$m" 2>/dev/null || true
   done
+}
+
+remove_ipv4_rule() {
+  while iptables "\$@" 2>/dev/null; do :; done
+}
+
+remove_ipv6_rule() {
+  while ip6tables "\$@" 2>/dev/null; do :; done
+}
+
+apply_vps2_killswitch() {
+  [[ -n "\$WAN_IFACE" ]] || return 0
+
+  remove_ipv4_rule -D FORWARD -i wg0 -o "\$WAN_IFACE" -j REJECT --reject-with icmp-net-unreachable
+  iptables -I FORWARD 1 -i wg0 -o "\$WAN_IFACE" -j REJECT --reject-with icmp-net-unreachable
+
+  # IPv6 routing to VPS2 is not configured by Phobos cascade/Xray TPROXY yet.
+  # Block it fail-closed so a dual-stack site cannot see VPS1 IPv6.
+  if [[ "\$IPV6_ON" -eq 1 ]]; then
+    remove_ipv6_rule -D FORWARD -i wg0 -j REJECT
+    ip6tables -I FORWARD 1 -i wg0 -j REJECT
+  fi
+}
+
+remove_vps2_killswitch() {
+  [[ -n "\$WAN_IFACE" ]] || return 0
+  remove_ipv4_rule -D FORWARD -i wg0 -o "\$WAN_IFACE" -j REJECT --reject-with icmp-net-unreachable
+  if [[ "\$IPV6_ON" -eq 1 ]]; then
+    remove_ipv6_rule -D FORWARD -i wg0 -j REJECT
+  fi
 }
 
 case "\${1:-}" in
   up)
     load_mods
     iptables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || iptables -A FORWARD -i wg0 -o wg0 -j DROP
-    iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -j ACCEPT
-    iptables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+    if [[ "\$PHOBOS_VPS2_ONLY" == "1" ]]; then
+      apply_vps2_killswitch
+      # In VPS2-only mode do not add direct wg0 -> WAN ACCEPT/NAT fallback.
+      # Xray TPROXY is delivered locally before FORWARD, and WireGuard cascade adds
+      # its own wg0 -> wg-exit ACCEPT rule when the VPS2 tunnel is up.
+    else
+      iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -j ACCEPT
+      iptables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+    fi
     if [[ "\$IPV6_ON" -eq 1 ]]; then
       ip6tables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || ip6tables -A FORWARD -i wg0 -o wg0 -j DROP
-      ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i wg0 -j ACCEPT
-      if [[ "\$IPV6_NAT" -eq 1 ]]; then
-        ip6tables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+      if [[ "\$PHOBOS_VPS2_ONLY" == "1" ]]; then
+        apply_vps2_killswitch
+      else
+        ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i wg0 -j ACCEPT
+        if [[ "\$IPV6_NAT" -eq 1 ]]; then
+          ip6tables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
+        fi
       fi
     fi
     ;;
@@ -206,6 +257,9 @@ case "\${1:-}" in
     iptables -D FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || true
     iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
     iptables -t nat -D POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+    if [[ "\${PHOBOS_KEEP_VPS2_KILLSWITCH:-0}" != "1" ]]; then
+      remove_vps2_killswitch
+    fi
     if [[ "\$IPV6_ON" -eq 1 ]]; then
       ip6tables -D FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || true
       ip6tables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true
@@ -213,6 +267,13 @@ case "\${1:-}" in
         ip6tables -t nat -D POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
       fi
     fi
+    ;;
+  killswitch-up)
+    load_mods
+    apply_vps2_killswitch
+    ;;
+  killswitch-down)
+    remove_vps2_killswitch
     ;;
   *)
     exit 1
