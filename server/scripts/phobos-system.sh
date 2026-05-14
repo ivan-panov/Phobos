@@ -18,7 +18,7 @@ action_status() {
         log_success "Служба $svc активна"
      else
         log_error "Служба $svc ОСТАНОВЛЕНА"
-        ((errors++))
+        errors=$((errors + 1))
      fi
   done
 
@@ -27,13 +27,13 @@ action_status() {
         log_success "Служба phobos-xray-upstream активна"
      else
         log_error "Служба phobos-xray-upstream ОСТАНОВЛЕНА"
-        ((errors++))
+        errors=$((errors + 1))
      fi
      if iptables -t mangle -S PHOBOS_XRAY >/dev/null 2>&1; then
         log_success "TPROXY правила Xray upstream активны"
      else
         log_error "TPROXY правила Xray upstream не найдены"
-        ((errors++))
+        errors=$((errors + 1))
      fi
   fi
   
@@ -42,9 +42,16 @@ action_status() {
      log_success "Порт Obfuscator ($OBFUSCATOR_PORT/udp) прослушивается"
   else
      log_error "Порт Obfuscator НЕ доступен"
-     ((errors++))
+     errors=$((errors + 1))
   fi
   
+  if ss -tlpn | grep -q ":$HTTP_PORT "; then
+     log_success "Порт HTTP ($HTTP_PORT/tcp) прослушивается"
+  else
+     log_error "Порт HTTP НЕ доступен"
+     errors=$((errors + 1))
+  fi
+
   # Disk
   local free_mb=$(df -m / | awk 'NR==2 {print $4}')
   if [[ "$free_mb" -lt 500 ]]; then
@@ -97,6 +104,22 @@ action_cleanup() {
   log_success "Очистка завершена."
 }
 
+
+action_ports() {
+  load_env
+  echo "Порты, которые нужно открыть:"
+  echo ""
+  echo "  UDP $OBFUSCATOR_PORT  - основной порт клиентов Phobos / wg-obfuscator"
+  echo "  TCP $HTTP_PORT  - HTTP-сервер для скачивания клиентских пакетов"
+  echo ""
+  echo "Команды для UFW:"
+  echo "  sudo ufw allow $OBFUSCATOR_PORT/udp comment 'Phobos wg-obfuscator'"
+  echo "  sudo ufw allow $HTTP_PORT/tcp comment 'Phobos package HTTP'"
+  echo "  sudo ufw reload"
+  echo ""
+  echo "Не открывай 51820/udp наружу: WireGuard должен быть скрыт за obfuscator."
+}
+
 action_monitor() {
   echo "Мониторинг клиентов (Live)..."
   echo "Ctrl+C для выхода"
@@ -107,8 +130,9 @@ case "$CMD" in
   status|health) action_status ;;
   cleanup) action_cleanup ;;
   monitor) action_monitor ;;
+  ports|firewall) action_ports ;;
   *)
-    echo "Usage: $0 {status|cleanup|monitor}"
+    echo "Usage: $0 {status|cleanup|monitor|ports}"
     exit 1
     ;;
 esac

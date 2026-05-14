@@ -20,7 +20,7 @@
 Запустите установку:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ivan-panov/Phobos/main/phobos-deploy.sh)" </dev/tty
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ground-Zerro/Phobos/main/phobos-deploy.sh)" </dev/tty
 ```
 
 ### 2. Установка на клиенте

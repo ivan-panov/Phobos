@@ -55,12 +55,12 @@ step_deps() {
   log_info "Установка зависимостей..."
   (
     apt-get update -qq \
-      && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard jq curl build-essential ufw iptables nftables
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard jq curl build-essential ufw iptables nftables kmod iproute2 ca-certificates
   ) >/dev/null 2>&1 &
   spin $! "Установка пакетов..."
   wait $!
   local apt_st=$?
-  [[ $apt_st -eq 0 ]] || die "Установка пакетов завершилась с ошибкой (код $apt_st). Запустите: apt-get update && apt-get install -y wireguard iptables nftables"
+  [[ $apt_st -eq 0 ]] || die "Установка пакетов завершилась с ошибкой (код $apt_st). Запустите: apt-get update && apt-get install -y wireguard iptables nftables kmod"
   command -v wg >/dev/null 2>&1 || die "Команда wg не найдена после установки wireguard-tools"
   log_success "Зависимости установлены."
 }
@@ -191,12 +191,12 @@ load_mods() {
 case "\${1:-}" in
   up)
     load_mods
-    iptables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || iptables -A FORWARD -i wg0 -o wg0 -j DROP
-    iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wg0 -j ACCEPT
+    iptables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || iptables -I FORWARD 1 -i wg0 -o wg0 -j DROP
+    iptables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -i wg0 -j ACCEPT
     iptables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
     if [[ "\$IPV6_ON" -eq 1 ]]; then
-      ip6tables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || ip6tables -A FORWARD -i wg0 -o wg0 -j DROP
-      ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -i wg0 -j ACCEPT
+      ip6tables -C FORWARD -i wg0 -o wg0 -j DROP 2>/dev/null || ip6tables -I FORWARD 1 -i wg0 -o wg0 -j DROP
+      ip6tables -C FORWARD -i wg0 -j ACCEPT 2>/dev/null || ip6tables -I FORWARD 2 -i wg0 -j ACCEPT
       if [[ "\$IPV6_NAT" -eq 1 ]]; then
         ip6tables -t nat -C POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -o "\$WAN_IFACE" -j MASQUERADE
       fi
@@ -372,6 +372,54 @@ EOF
   log_success "HTTP сервер настроен на порту $port"
 }
 
+write_firewall_ports_file() {
+  load_env
+  cat > "$PHOBOS_DIR/server/firewall-ports.txt" <<EOF
+Phobos firewall ports
+=====================
+
+Open these ports on the VPS firewall and in the provider security group:
+
+1) ${OBFUSCATOR_PORT}/udp  - main client connection port (wg-obfuscator)
+2) ${HTTP_PORT}/tcp        - HTTP package/download server
+
+Do NOT expose 51820/udp to the Internet. WireGuard is behind wg-obfuscator.
+
+UFW commands:
+  sudo ufw allow ${OBFUSCATOR_PORT}/udp comment 'Phobos wg-obfuscator'
+  sudo ufw allow ${HTTP_PORT}/tcp comment 'Phobos package HTTP'
+  sudo ufw reload
+
+Provider firewall/security group:
+  UDP ${OBFUSCATOR_PORT}
+  TCP ${HTTP_PORT}
+EOF
+}
+
+show_firewall_ports() {
+  load_env
+  write_firewall_ports_file
+
+  echo ""
+  echo "=========================================="
+  echo " ПОРТЫ, КОТОРЫЕ НУЖНО ОТКРЫТЬ"
+  echo "=========================================="
+  echo ""
+  echo "Открой на VPS firewall и в firewall/security group провайдера:"
+  echo ""
+  echo "  UDP ${OBFUSCATOR_PORT}  - основной порт клиентов Phobos / wg-obfuscator"
+  echo "  TCP ${HTTP_PORT}  - HTTP-сервер для скачивания клиентских пакетов"
+  echo ""
+  echo "Команды для UFW:"
+  echo "  sudo ufw allow ${OBFUSCATOR_PORT}/udp comment 'Phobos wg-obfuscator'"
+  echo "  sudo ufw allow ${HTTP_PORT}/tcp comment 'Phobos package HTTP'"
+  echo "  sudo ufw reload"
+  echo ""
+  echo "НЕ открывай наружу 51820/udp: WireGuard должен быть спрятан за obfuscator."
+  echo "Список сохранён в: $PHOBOS_DIR/server/firewall-ports.txt"
+  echo ""
+}
+
 step_final() {
   log_info "Настройка Cron..."
   echo "*/10 * * * * root $REPO_DIR/server/scripts/phobos-system.sh cleanup" > /etc/cron.d/phobos-cleanup
@@ -379,6 +427,8 @@ step_final() {
 
   log_info "Установка меню..."
   ln -sf "$REPO_DIR/server/scripts/phobos-menu.sh" /usr/local/bin/phobos
+
+  show_firewall_ports
 
   log_success "Установка завершена! Запустите 'phobos' для управления системой."
 }

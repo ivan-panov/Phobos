@@ -58,10 +58,20 @@ check_root() {
 }
 
 load_env() {
+  local had_errexit=0
+  case "$-" in
+    *e*) had_errexit=1 ;;
+  esac
+
   if [[ -f "$SERVER_ENV" ]]; then
     set +e
+    # shellcheck disable=SC1090
     source "$SERVER_ENV"
-    set -e
+    if [[ "$had_errexit" -eq 1 ]]; then
+      set -e
+    else
+      set +e
+    fi
   fi
 
   export OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-51821}"
@@ -70,6 +80,7 @@ load_env() {
   export OBFUSCATOR_IDLE="${OBFUSCATOR_IDLE:-300}"
   export OBFUSCATOR_MASKING="${OBFUSCATOR_MASKING:-AUTO}"
   export WG_LOCAL_ENDPOINT="${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}"
+  export HTTP_PORT="${HTTP_PORT:-80}"
   export TOKEN_TTL="${TOKEN_TTL:-86400}"
   export SERVER_PUBLIC_IP_V4="${SERVER_PUBLIC_IP_V4:-0.0.0.0}"
   export SERVER_PUBLIC_IP_V6="${SERVER_PUBLIC_IP_V6:-}"

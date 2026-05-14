@@ -14,10 +14,10 @@ XRAY_META="$PHOBOS_DIR/server/xray-upstream.env"
 XRAY_FW="$PHOBOS_DIR/server/xray-upstream-fw.sh"
 XRAY_SERVICE="/etc/systemd/system/phobos-xray-upstream.service"
 XRAY_BIN="/usr/local/bin/xray"
-TPROXY_PORT="${TPROXY_PORT:-12345}"
-TPROXY_MARK="${TPROXY_MARK:-1}"
-TPROXY_TABLE="${TPROXY_TABLE:-100}"
-WG_IFACE="${WG_IFACE:-wg0}"
+TPROXY_PORT="${TPROXY_PORT:-${XRAY_TPROXY_PORT:-12345}}"
+TPROXY_MARK="${TPROXY_MARK:-${XRAY_TPROXY_MARK:-1}}"
+TPROXY_TABLE="${TPROXY_TABLE:-${XRAY_TPROXY_TABLE:-100}}"
+WG_IFACE="${WG_IFACE:-${XRAY_WG_IFACE:-wg0}}"
 
 usage() {
   cat <<USAGE
@@ -37,7 +37,7 @@ USAGE
 install_deps() {
   log_info "Установка зависимостей Xray upstream..."
   apt-get update -qq >/dev/null
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates unzip jq python3 iproute2 iptables >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates unzip jq python3 iproute2 iptables nftables kmod >/dev/null
   log_success "Зависимости установлены"
 }
 
@@ -186,7 +186,7 @@ config = {
     'log': {'loglevel': 'warning'},
     'inbounds': [{
         'tag': 'phobos-tproxy-in',
-        'listen': '127.0.0.1',
+        'listen': '0.0.0.0',
         'port': 12345,
         'protocol': 'dokodemo-door',
         'settings': {'network': 'tcp,udp', 'followRedirect': True},
@@ -269,10 +269,31 @@ rule_exists() {
   iptables "\$@" >/dev/null 2>&1
 }
 
+remove_prerouting_jump() {
+  while iptables -t mangle -C PREROUTING -i "\$WG_IFACE" -j "\$CHAIN" >/dev/null 2>&1; do
+    iptables -t mangle -D PREROUTING -i "\$WG_IFACE" -j "\$CHAIN" 2>/dev/null || break
+  done
+}
+
 load_mods() {
   for m in xt_TPROXY nf_tproxy_ipv4 nf_tproxy_ipv6 xt_socket nf_defrag_ipv4 nf_defrag_ipv6; do
     modprobe "\$m" 2>/dev/null || true
   done
+}
+
+check_tproxy_support() {
+  local test_chain="PHOBOS_XRAY_TEST_\$\$"
+  local st=0
+
+  iptables -t mangle -N "\$test_chain" 2>/dev/null || true
+  if ! iptables -t mangle -A "\$test_chain" -p tcp -j TPROXY --on-ip 127.0.0.1 --on-port "\$TPROXY_PORT" --tproxy-mark "\$TPROXY_MARK/\$TPROXY_MARK" >/dev/null 2>&1; then
+    echo "TPROXY target is not available for current iptables backend: \$(iptables -V 2>/dev/null || echo unknown)" >&2
+    echo "Ubuntu 24.04 normally uses iptables-nft; install/check kmod iptables nftables and kernel modules xt_TPROXY nf_tproxy_ipv4." >&2
+    st=1
+  fi
+  iptables -t mangle -F "\$test_chain" 2>/dev/null || true
+  iptables -t mangle -X "\$test_chain" 2>/dev/null || true
+  return "\$st"
 }
 
 add_ip_rule() {
@@ -295,9 +316,11 @@ del_ip_rule() {
 
 up() {
   load_mods
+  check_tproxy_support
   [[ -d "/sys/class/net/\$WG_IFACE" ]] || { echo "Interface \$WG_IFACE not found" >&2; exit 1; }
   add_ip_rule
 
+  remove_prerouting_jump
   iptables_has_chain || iptables -t mangle -N "\$CHAIN"
   iptables -t mangle -F "\$CHAIN"
 
@@ -313,11 +336,11 @@ up() {
   iptables -t mangle -A "\$CHAIN" -p udp -j TPROXY --on-ip 127.0.0.1 --on-port "\$TPROXY_PORT" --tproxy-mark "\$TPROXY_MARK/\$TPROXY_MARK"
 
   rule_exists -t mangle -C PREROUTING -i "\$WG_IFACE" -j "\$CHAIN" \
-    || iptables -t mangle -A PREROUTING -i "\$WG_IFACE" -j "\$CHAIN"
+    || iptables -t mangle -I PREROUTING 1 -i "\$WG_IFACE" -j "\$CHAIN"
 }
 
 down() {
-  iptables -t mangle -D PREROUTING -i "\$WG_IFACE" -j "\$CHAIN" 2>/dev/null || true
+  remove_prerouting_jump
   if iptables_has_chain; then
     iptables -t mangle -F "\$CHAIN" 2>/dev/null || true
     iptables -t mangle -X "\$CHAIN" 2>/dev/null || true
@@ -339,9 +362,8 @@ write_service() {
   cat > "$XRAY_SERVICE" <<SERVICE
 [Unit]
 Description=Phobos Xray VLESS upstream to VPS2
-After=network-online.target wg-quick@wg0.service
-Wants=network-online.target
-Requires=wg-quick@wg0.service
+After=network-online.target wg-quick@${WG_IFACE}.service
+Wants=network-online.target wg-quick@${WG_IFACE}.service
 
 [Service]
 Type=simple
@@ -403,7 +425,7 @@ cmd_configure() {
   validate_config || die "Xray не принял конфиг: $XRAY_CONFIG"
 
   systemctl restart phobos-xray-upstream
-  log_success "VPS1 подключен к VPS2 через Xray/VLESS. Трафик wg0 теперь уходит через upstream."
+  log_success "VPS1 подключен к VPS2 через Xray/VLESS. Трафик ${WG_IFACE} теперь уходит через upstream."
   cmd_status
 }
 
@@ -429,6 +451,7 @@ cmd_status() {
   echo "Enabled:   $enabled"
   echo "Config:    $XRAY_CONFIG"
   echo "Firewall:  $XRAY_FW"
+  echo "iptables:  $(iptables -V 2>/dev/null || echo unavailable)"
   echo ""
   ip rule show 2>/dev/null | grep -E "fwmark .* lookup ${TPROXY_TABLE}" || true
   iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || true
