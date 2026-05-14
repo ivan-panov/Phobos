@@ -2,6 +2,8 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -47,7 +49,25 @@ clone_repository() {
 
     mkdir -p "$REPO_DIR"
 
-    log_message "Клонирование репозитория Phobos..."
+    if [ -d "$SCRIPT_DIR/server" ] && [ -d "$SCRIPT_DIR/client" ]; then
+        log_message "Копирование локальной сборки Phobos из архива..."
+        cp -a "$SCRIPT_DIR/server" "$REPO_DIR/"
+        cp -a "$SCRIPT_DIR/client" "$REPO_DIR/"
+        if [ -d "$SCRIPT_DIR/wg-obfuscator" ]; then
+            cp -a "$SCRIPT_DIR/wg-obfuscator" "$REPO_DIR/"
+        fi
+        if [ -f "$SCRIPT_DIR/README.md" ]; then
+            cp -a "$SCRIPT_DIR/README.md" "$REPO_DIR/"
+        fi
+
+        find "$REPO_DIR/server" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+        find "$REPO_DIR/client" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+
+        log_message "Локальная сборка загружена"
+        return 0
+    fi
+
+    log_message "Локальной сборки рядом со скриптом нет, клонирую Phobos из GitHub..."
 
     cd "$REPO_DIR"
     git init >/dev/null 2>&1
@@ -150,6 +170,18 @@ add_first_client() {
     log_message "Клиент $FIRST_CLIENT создан"
 }
 
+show_firewall_ports_final() {
+    SYSTEM_SCRIPT="/opt/Phobos/repo/server/scripts/phobos-system.sh"
+
+    if [ -x "$SYSTEM_SCRIPT" ]; then
+        echo ""
+        "$SYSTEM_SCRIPT" ports || true
+    else
+        echo ""
+        echo "Порты Phobos для открытия: UDP obfuscator и TCP HTTP из /opt/Phobos/server/server.env"
+    fi
+}
+
 check_root
 install_git
 clone_repository
@@ -157,6 +189,7 @@ prompt_username
 prompt_obfuscation_level
 run_installer
 add_first_client
+show_firewall_ports_final
 
 echo ""
 log_message "=========================================="

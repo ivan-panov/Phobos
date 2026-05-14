@@ -107,7 +107,29 @@ action_cleanup() {
 
 action_ports() {
   load_env
-  echo "Порты, которые нужно открыть:"
+  mkdir -p "$PHOBOS_DIR/server"
+  cat > "$PHOBOS_DIR/server/firewall-ports.txt" <<EOF_PORTS
+Phobos firewall ports
+=====================
+
+Open these ports on the VPS firewall and in the provider security group:
+
+1) ${OBFUSCATOR_PORT}/udp  - main client connection port (wg-obfuscator)
+2) ${HTTP_PORT}/tcp        - HTTP package/download server
+
+Do NOT expose 51820/udp to the Internet. WireGuard is behind wg-obfuscator.
+
+UFW commands:
+  sudo ufw allow ${OBFUSCATOR_PORT}/udp comment 'Phobos wg-obfuscator'
+  sudo ufw allow ${HTTP_PORT}/tcp comment 'Phobos package HTTP'
+  sudo ufw reload
+EOF_PORTS
+
+  echo "=========================================="
+  echo " ПОРТЫ, КОТОРЫЕ НУЖНО ОТКРЫТЬ"
+  echo "=========================================="
+  echo ""
+  echo "Открой на VPS firewall и в firewall/security group провайдера:"
   echo ""
   echo "  UDP $OBFUSCATOR_PORT  - основной порт клиентов Phobos / wg-obfuscator"
   echo "  TCP $HTTP_PORT  - HTTP-сервер для скачивания клиентских пакетов"
@@ -118,6 +140,7 @@ action_ports() {
   echo "  sudo ufw reload"
   echo ""
   echo "Не открывай 51820/udp наружу: WireGuard должен быть скрыт за obfuscator."
+  echo "Список сохранён в: $PHOBOS_DIR/server/firewall-ports.txt"
 }
 
 action_monitor() {
