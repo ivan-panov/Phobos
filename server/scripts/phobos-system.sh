@@ -105,10 +105,18 @@ action_cleanup() {
 }
 
 
-action_ports() {
+actual_obfuscator_port() {
+  if [[ -f "$OBF_CONFIG" ]]; then
+    awk -F= '/^[[:space:]]*source-lport[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "$OBF_CONFIG"
+  fi
+}
+
+write_firewall_ports_file() {
   load_env
-  mkdir -p "$PHOBOS_DIR/server"
-  cat > "$PHOBOS_DIR/server/firewall-ports.txt" <<EOF_PORTS
+  local actual_port
+  actual_port=$(actual_obfuscator_port)
+  [[ -n "$actual_port" ]] && OBFUSCATOR_PORT="$actual_port"
+  cat > "$PHOBOS_DIR/server/firewall-ports.txt" <<EOF
 Phobos firewall ports
 =====================
 
@@ -123,13 +131,23 @@ UFW commands:
   sudo ufw allow ${OBFUSCATOR_PORT}/udp comment 'Phobos wg-obfuscator'
   sudo ufw allow ${HTTP_PORT}/tcp comment 'Phobos package HTTP'
   sudo ufw reload
-EOF_PORTS
 
-  echo "=========================================="
-  echo " ПОРТЫ, КОТОРЫЕ НУЖНО ОТКРЫТЬ"
-  echo "=========================================="
-  echo ""
-  echo "Открой на VPS firewall и в firewall/security group провайдера:"
+Provider firewall/security group:
+  UDP ${OBFUSCATOR_PORT}
+  TCP ${HTTP_PORT}
+EOF
+}
+
+action_ports() {
+  load_env
+  local actual_port
+  actual_port=$(actual_obfuscator_port)
+  if [[ -n "$actual_port" && "$actual_port" != "$OBFUSCATOR_PORT" ]]; then
+    log_warn "server.env содержит OBFUSCATOR_PORT=$OBFUSCATOR_PORT, но wg-obfuscator.conf слушает $actual_port. Использую фактический порт $actual_port."
+    OBFUSCATOR_PORT="$actual_port"
+  fi
+  write_firewall_ports_file
+  echo "Порты, которые нужно открыть:"
   echo ""
   echo "  UDP $OBFUSCATOR_PORT  - основной порт клиентов Phobos / wg-obfuscator"
   echo "  TCP $HTTP_PORT  - HTTP-сервер для скачивания клиентских пакетов"
@@ -139,9 +157,11 @@ EOF_PORTS
   echo "  sudo ufw allow $HTTP_PORT/tcp comment 'Phobos package HTTP'"
   echo "  sudo ufw reload"
   echo ""
+  echo "Провайдерский firewall/security group: UDP $OBFUSCATOR_PORT и TCP $HTTP_PORT"
   echo "Не открывай 51820/udp наружу: WireGuard должен быть скрыт за obfuscator."
-  echo "Список сохранён в: $PHOBOS_DIR/server/firewall-ports.txt"
+  echo "Сохранено в: $PHOBOS_DIR/server/firewall-ports.txt"
 }
+
 
 action_monitor() {
   echo "Мониторинг клиентов (Live)..."

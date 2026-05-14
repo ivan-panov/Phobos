@@ -22,8 +22,8 @@ if [[ -f "$XRAY_ENV" ]]; then
   XRAY_PROXY_PORT="${TPROXY_PORT:-$XRAY_PROXY_PORT}"
 fi
 
-PHOBOS_HTTP_PORT="${HTTP_PORT:-80}"
-PHOBOS_OBF_PORT="${OBFUSCATOR_PORT:-51821}"
+PHOBOS_HTTP_PORT="${HTTP_PORT:-11144}"
+PHOBOS_OBF_PORT="${OBFUSCATOR_PORT:-1905}"
 
 require_ufw() {
   if ! command -v ufw >/dev/null 2>&1; then

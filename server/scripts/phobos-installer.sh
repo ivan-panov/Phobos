@@ -20,6 +20,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib-core.sh"
 check_root
 
 OBF_LEVEL="${OBF_LEVEL:-2}"
+# Preserve existing ports/keys on reinstall. Ubuntu 24.04 + Remnawave clients break if this rotates.
+load_env
+
 
 get_obf_params() {
   local level="${1:-2}"
@@ -143,9 +146,19 @@ step_wg() {
 
   load_netfilter_wireguard_modules
 
-  local priv pub
-  priv=$(wg genkey) || die "Не удалось сгенерировать приватный ключ WireGuard"
-  pub=$(printf '%s\n' "$priv" | wg pubkey) || die "Не удалось получить публичный ключ WireGuard"
+  local priv="${SERVER_WG_PRIVATE_KEY:-}"
+  local pub="${SERVER_WG_PUBLIC_KEY:-}"
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    priv=$(wg genkey) || die "Не удалось сгенерировать приватный ключ WireGuard"
+    pub=$(printf '%s\n' "$priv" | wg pubkey) || die "Не удалось получить публичный ключ WireGuard"
+  else
+    local check_pub
+    check_pub=$(printf '%s\n' "$priv" | wg pubkey 2>/dev/null || true)
+    if [[ "$check_pub" != "$pub" ]]; then
+      log_warn "SERVER_WG_PUBLIC_KEY не совпадает с SERVER_WG_PRIVATE_KEY, пересчитываю public key"
+      pub="$check_pub"
+    fi
+  fi
 
   local wg_ipv4_net="10.25.0.0/16"
   local wg_ipv6_net="fd00:10:25::/48"
@@ -221,12 +234,19 @@ esac
 EOF
   chmod 700 "$PHOBOS_DIR/server/wg0-fw.sh"
 
-  cat > "$SERVER_ENV" <<EOF
+  if [[ -f "$SERVER_ENV" ]]; then
+    grep -vE '^(SERVER_WG_PRIVATE_KEY|SERVER_WG_PUBLIC_KEY|SERVER_WG_IPV4_NETWORK|SERVER_WG_IPV6_NETWORK)=' "$SERVER_ENV" > "$SERVER_ENV.tmp" || true
+    mv "$SERVER_ENV.tmp" "$SERVER_ENV"
+  else
+    : > "$SERVER_ENV"
+  fi
+  cat >> "$SERVER_ENV" <<EOF
 SERVER_WG_PRIVATE_KEY=$priv
 SERVER_WG_PUBLIC_KEY=$pub
 SERVER_WG_IPV4_NETWORK=$wg_ipv4_net
 SERVER_WG_IPV6_NETWORK=$wg_ipv6_net
 EOF
+  chmod 600 "$SERVER_ENV"
 
   cat > "$WG_CONFIG" <<EOF
 [Interface]
@@ -236,6 +256,32 @@ PrivateKey = $priv
 PostUp = $PHOBOS_DIR/server/wg0-fw.sh up
 PostDown = $PHOBOS_DIR/server/wg0-fw.sh down
 EOF
+
+  # Preserve existing clients across reinstall by restoring peers from /opt/Phobos/clients.
+  if [[ -d "$CLIENTS_DIR" ]]; then
+    for client_dir in "$CLIENTS_DIR"/*; do
+      [[ -d "$client_dir" ]] || continue
+      [[ -f "$client_dir/client_public.key" ]] || continue
+      local peer_pub peer_v4 peer_v6 peer_ips
+      peer_pub=$(cat "$client_dir/client_public.key")
+      peer_v4=""
+      peer_v6=""
+      if [[ -f "$client_dir/metadata.json" ]] && command -v jq >/dev/null 2>&1; then
+        peer_v4=$(jq -r '.tunnel_ip_v4 // empty' "$client_dir/metadata.json" 2>/dev/null || true)
+        peer_v6=$(jq -r '.tunnel_ip_v6 // empty' "$client_dir/metadata.json" 2>/dev/null || true)
+      fi
+      [[ -z "$peer_v4" ]] && continue
+      peer_ips="$peer_v4/32"
+      [[ -n "$peer_v6" ]] && peer_ips="$peer_ips, $peer_v6/128"
+      cat >> "$WG_CONFIG" <<EOF_PEER
+
+[Peer]
+PublicKey = $peer_pub
+AllowedIPs = $peer_ips
+EOF_PEER
+    done
+  fi
+
   chmod 600 "$WG_CONFIG"
 
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -279,8 +325,16 @@ step_obf() {
   local key_len=$(echo "$params" | cut -d' ' -f1)
   local dummy=$(echo "$params" | cut -d' ' -f2)
 
-  local port=$(find_free_port 1024 49151)
-  local key=$(head -c $((key_len * 2)) /dev/urandom | base64 | tr -d '+/=\n' | head -c "$key_len")
+  local port="${OBFUSCATOR_PORT:-1905}"
+  if port_in_use "$port"; then
+    log_warn "Порт Obfuscator $port занят. Подбираю свободный порт. Клиентские пакеты надо пересоздать."
+    port=$(find_free_port 1024 49151) || die "Не удалось подобрать свободный UDP-порт для Obfuscator"
+  fi
+
+  local key="${OBFUSCATOR_KEY:-}"
+  if [[ -z "$key" || "$key" == "KEY" ]]; then
+    key=$(head -c $((key_len * 2)) /dev/urandom | base64 | tr -d '+/=\n' | head -c "$key_len")
+  fi
   local pub_ip_v4
   pub_ip_v4=$(get_public_ipv4) || true
   if [[ -z "$pub_ip_v4" ]]; then
@@ -293,17 +347,20 @@ step_obf() {
   fi
   local pub_ip_v6=$(get_public_ipv6)
 
+  grep -vE '^(OBFUSCATOR_PORT|OBFUSCATOR_KEY|OBFUSCATOR_DUMMY|OBFUSCATOR_IDLE|OBFUSCATOR_MASKING|SERVER_PUBLIC_IP_V4|SERVER_PUBLIC_IP_V6|WG_LOCAL_ENDPOINT|CLIENT_WG_PORT)=' "$SERVER_ENV" > "$SERVER_ENV.tmp" 2>/dev/null || true
+  mv "$SERVER_ENV.tmp" "$SERVER_ENV"
   cat >> "$SERVER_ENV" <<EOF
 OBFUSCATOR_PORT=$port
 OBFUSCATOR_KEY=$key
-OBFUSCATOR_DUMMY=$dummy
-OBFUSCATOR_IDLE=300
-OBFUSCATOR_MASKING=STUN
+OBFUSCATOR_DUMMY=${OBFUSCATOR_DUMMY:-$dummy}
+OBFUSCATOR_IDLE=${OBFUSCATOR_IDLE:-300}
+OBFUSCATOR_MASKING=${OBFUSCATOR_MASKING:-STUN}
 SERVER_PUBLIC_IP_V4=$pub_ip_v4
 SERVER_PUBLIC_IP_V6=$pub_ip_v6
-WG_LOCAL_ENDPOINT=127.0.0.1:51820
-CLIENT_WG_PORT=13255
+WG_LOCAL_ENDPOINT=${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}
+CLIENT_WG_PORT=${CLIENT_WG_PORT:-13255}
 EOF
+  chmod 600 "$SERVER_ENV"
 
   cat > /etc/systemd/system/wg-obfuscator.service <<EOF
 [Unit]
@@ -329,12 +386,12 @@ EOF
 [instance]
 source-if = 0.0.0.0
 source-lport = $port
-target = 127.0.0.1:51820
+target = ${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}
 key = $key
-masking = STUN
+masking = ${OBFUSCATOR_MASKING:-STUN}
 verbose = INFO
-idle-timeout = 300
-max-dummy = $dummy
+idle-timeout = ${OBFUSCATOR_IDLE:-300}
+max-dummy = ${OBFUSCATOR_DUMMY:-$dummy}
 EOF
 
   systemctl restart wg-obfuscator
@@ -344,7 +401,11 @@ EOF
 step_http() {
   log_info "Настройка HTTP сервера..."
 
-  local port=$(find_free_port 1024 49151)
+  local port="${HTTP_PORT:-11144}"
+  if port_in_use "$port"; then
+    log_warn "HTTP-порт $port занят. Подбираю свободный порт."
+    port=$(find_free_port 1024 49151) || die "Не удалось подобрать свободный TCP-порт для HTTP"
+  fi
 
   cat > /etc/systemd/system/phobos-http.service <<EOF
 [Unit]
@@ -367,7 +428,10 @@ EOF
   systemctl enable phobos-http
   systemctl restart phobos-http
 
+  grep -vE '^HTTP_PORT=' "$SERVER_ENV" > "$SERVER_ENV.tmp" 2>/dev/null || true
+  mv "$SERVER_ENV.tmp" "$SERVER_ENV"
   echo "HTTP_PORT=$port" >> "$SERVER_ENV"
+  chmod 600 "$SERVER_ENV"
 
   log_success "HTTP сервер настроен на порту $port"
 }

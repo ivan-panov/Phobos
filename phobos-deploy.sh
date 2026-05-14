@@ -2,8 +2,6 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -41,6 +39,7 @@ install_git() {
 clone_repository() {
     PHOBOS_BASE_DIR="/opt/Phobos"
     REPO_DIR="$PHOBOS_BASE_DIR/repo"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [ -d "$REPO_DIR" ]; then
         log_message "Удаление существующего репозитория..."
@@ -49,43 +48,30 @@ clone_repository() {
 
     mkdir -p "$REPO_DIR"
 
-    if [ -d "$SCRIPT_DIR/server" ] && [ -d "$SCRIPT_DIR/client" ]; then
-        log_message "Копирование локальной сборки Phobos из архива..."
-        cp -a "$SCRIPT_DIR/server" "$REPO_DIR/"
-        cp -a "$SCRIPT_DIR/client" "$REPO_DIR/"
-        if [ -d "$SCRIPT_DIR/wg-obfuscator" ]; then
-            cp -a "$SCRIPT_DIR/wg-obfuscator" "$REPO_DIR/"
-        fi
-        if [ -f "$SCRIPT_DIR/README.md" ]; then
-            cp -a "$SCRIPT_DIR/README.md" "$REPO_DIR/"
-        fi
+    if [ -d "$SCRIPT_DIR/server" ] && [ -d "$SCRIPT_DIR/client" ] && [ -d "$SCRIPT_DIR/wg-obfuscator" ]; then
+        log_message "Использую локальную сборку из архива, GitHub не трогаю..."
+        cp -a "$SCRIPT_DIR/server" "$SCRIPT_DIR/client" "$SCRIPT_DIR/wg-obfuscator" "$REPO_DIR/" || error_exit "Не удалось скопировать локальную сборку"
+    else
+        log_message "Локальная сборка не найдена, загружаю Phobos из GitHub..."
+        cd "$REPO_DIR"
+        git init >/dev/null 2>&1
+        git remote add origin https://github.com/ivan-panov/Phobos.git >/dev/null 2>&1
+        git config core.sparseCheckout true >/dev/null 2>&1
 
-        find "$REPO_DIR/server" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-        find "$REPO_DIR/client" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+        echo "server" > .git/info/sparse-checkout
+        echo "client" >> .git/info/sparse-checkout
+        echo "wg-obfuscator" >> .git/info/sparse-checkout
 
-        log_message "Локальная сборка загружена"
-        return 0
+        git pull origin main >/dev/null 2>&1 || error_exit "Не удалось загрузить репозиторий"
+        rm -rf .git >/dev/null 2>&1
     fi
 
-    log_message "Локальной сборки рядом со скриптом нет, клонирую Phobos из GitHub..."
+    find "$REPO_DIR/server" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+    find "$REPO_DIR/client" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
-    cd "$REPO_DIR"
-    git init >/dev/null 2>&1
-    git remote add origin https://github.com/ivan-panov/Phobos.git >/dev/null 2>&1
-    git config core.sparseCheckout true >/dev/null 2>&1
-
-    echo "server" > .git/info/sparse-checkout
-    echo "client" >> .git/info/sparse-checkout
-    echo "wg-obfuscator" >> .git/info/sparse-checkout
-
-    git pull origin main >/dev/null 2>&1 || error_exit "Не удалось загрузить репозиторий"
-    rm -rf .git >/dev/null 2>&1
-
-    find server -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-    find client -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-
-    log_message "Репозиторий загружен"
+    log_message "Репозиторий подготовлен"
 }
+
 
 prompt_username() {
     echo
@@ -170,15 +156,11 @@ add_first_client() {
     log_message "Клиент $FIRST_CLIENT создан"
 }
 
-show_firewall_ports_final() {
+show_ports() {
     SYSTEM_SCRIPT="/opt/Phobos/repo/server/scripts/phobos-system.sh"
-
     if [ -x "$SYSTEM_SCRIPT" ]; then
         echo ""
         "$SYSTEM_SCRIPT" ports || true
-    else
-        echo ""
-        echo "Порты Phobos для открытия: UDP obfuscator и TCP HTTP из /opt/Phobos/server/server.env"
     fi
 }
 
@@ -189,7 +171,7 @@ prompt_username
 prompt_obfuscation_level
 run_installer
 add_first_client
-show_firewall_ports_final
+show_ports
 
 echo ""
 log_message "=========================================="

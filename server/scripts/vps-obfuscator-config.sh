@@ -12,7 +12,7 @@ load_config() {
     source "$SERVER_ENV"
   fi
   
-  OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-$(grep 'source-lport' "$OBF_CONFIG" 2>/dev/null | awk '{print $3}' || echo 51821)}"
+  OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-$(grep 'source-lport' "$OBF_CONFIG" 2>/dev/null | awk '{print $3}' || echo 1905)}"
   OBFUSCATOR_KEY="${OBFUSCATOR_KEY:-$(grep 'key' "$OBF_CONFIG" 2>/dev/null | awk '{print $3}' || echo "KEY")}"
   SERVER_PUBLIC_IP_V4="${SERVER_PUBLIC_IP_V4:-0.0.0.0}"
   SERVER_PUBLIC_IP_V6="${SERVER_PUBLIC_IP_V6:-}"

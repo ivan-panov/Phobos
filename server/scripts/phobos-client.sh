@@ -114,9 +114,9 @@ EOF
 [instance]
 source-if = 127.0.0.1
 source-lport = ${CLIENT_WG_PORT:-13255}
-target = $SERVER_PUBLIC_IP_V4:${OBFUSCATOR_PORT:-51821}
+target = $SERVER_PUBLIC_IP_V4:${OBFUSCATOR_PORT:-1905}
 key = ${OBFUSCATOR_KEY:-KEY}
-masking = ${OBFUSCATOR_MASKING:-AUTO}
+masking = ${OBFUSCATOR_MASKING:-STUN}
 verbose = INFO
 idle-timeout = ${OBFUSCATOR_IDLE:-300}
 max-dummy = ${OBFUSCATOR_DUMMY:-4}
@@ -195,12 +195,44 @@ action_remove() {
   log_success "Клиент $id полностью удален."
 }
 
+refresh_client_obfuscator_config() {
+  local id="$1"
+  local dir="$CLIENTS_DIR/$id"
+  [[ -d "$dir" ]] || return 1
+
+  cat > "$dir/wg-obfuscator.conf" <<EOF
+[instance]
+source-if = 127.0.0.1
+source-lport = ${CLIENT_WG_PORT:-13255}
+target = $SERVER_PUBLIC_IP_V4:${OBFUSCATOR_PORT:-1905}
+key = ${OBFUSCATOR_KEY:-KEY}
+masking = ${OBFUSCATOR_MASKING:-STUN}
+verbose = INFO
+idle-timeout = ${OBFUSCATOR_IDLE:-300}
+max-dummy = ${OBFUSCATOR_DUMMY:-4}
+EOF
+  chmod 600 "$dir/wg-obfuscator.conf"
+
+  if [[ -f "$dir/metadata.json" ]] && command -v jq >/dev/null 2>&1; then
+    jq \
+      --arg server_ip_v4 "$SERVER_PUBLIC_IP_V4" \
+      --arg server_port "${OBFUSCATOR_PORT:-1905}" \
+      --arg obfuscator_key "${OBFUSCATOR_KEY:-}" \
+      --arg obfuscator_dummy "${OBFUSCATOR_DUMMY:-4}" \
+      --arg obfuscator_idle "${OBFUSCATOR_IDLE:-300}" \
+      '.server_ip_v4=$server_ip_v4 | .server_port=$server_port | .obfuscator_key=$obfuscator_key | .obfuscator_dummy=$obfuscator_dummy | .obfuscator_idle=$obfuscator_idle' \
+      "$dir/metadata.json" > "$dir/metadata.json.tmp" && mv "$dir/metadata.json.tmp" "$dir/metadata.json"
+    chmod 600 "$dir/metadata.json"
+  fi
+}
+
 action_package() {
   local id=$(resolve_client "$CLIENT_ARG")
   if [[ -z "$id" ]]; then die "Клиент не найден."; fi
   
   log_info "Сборка пакета для $id..."
   local dir="$CLIENTS_DIR/$id"
+  refresh_client_obfuscator_config "$id"
   local tmp=$(mktemp -d)
   local pkg_root="$tmp/phobos-$id"
   
@@ -304,7 +336,7 @@ action_link() {
   ln -s "$PACKAGES_DIR/phobos-$id.tar.gz" "$link_dir/phobos-$id.tar.gz"
 
   mkdir -p "$WWW_DIR/init"
-  local script_url="http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/packages/$token/phobos-$id.tar.gz"
+  local script_url="http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-11144}/packages/$token/phobos-$id.tar.gz"
 
   cat > "$WWW_DIR/init/$token.sh" <<EOF
 #!/bin/sh
@@ -325,7 +357,7 @@ chmod +x install-router.sh
 ./install-router.sh
 EOF
 
-  local cmd="curl -s http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-80}/init/$token.sh | sh"
+  local cmd="curl -s http://${SERVER_PUBLIC_IP_V4}:${HTTP_PORT:-11144}/init/$token.sh | sh"
 
   echo ""
   echo "=================================================="
