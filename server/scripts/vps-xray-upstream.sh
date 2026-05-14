@@ -21,9 +21,10 @@ WG_IFACE="${WG_IFACE:-${XRAY_WG_IFACE:-wg0}}"
 
 usage() {
   cat <<USAGE
-Usage: $0 {configure|status|start|stop|restart|disable|logs}
+Usage: $0 {configure|create|status|start|stop|restart|disable|logs}
 
-configure  - настроить VPS1 как Xray/VLESS клиент к VPS2 (vless:// или Remnawave subscription URL)
+configure  - настроить VPS1 как Xray/VLESS клиент к VPS2 (Remnawave vless:// link)
+create     - алиас configure
 status     - показать состояние upstream
 start      - запустить phobos-xray-upstream
 stop       - остановить phobos-xray-upstream и снять TPROXY правила
@@ -76,88 +77,6 @@ install_xray() {
   [[ -f "$tmp/xray/geoip.dat" ]] && install -m 0644 "$tmp/xray/geoip.dat" /usr/local/share/xray/geoip.dat
   [[ -f "$tmp/xray/geosite.dat" ]] && install -m 0644 "$tmp/xray/geosite.dat" /usr/local/share/xray/geosite.dat
   log_success "Xray установлен: $XRAY_BIN"
-}
-
-
-resolve_vless_link() {
-  local input="$1"
-  input="$(printf '%s' "$input" | tr -d '\r\n')"
-
-  if [[ "$input" == vless://* ]]; then
-    printf '%s\n' "$input"
-    return 0
-  fi
-
-  if [[ "$input" != http://* && "$input" != https://* ]]; then
-    die "Нужна vless:// ссылка или Remnawave subscription URL (http/https)"
-  fi
-
-  local tmp out
-  tmp="$(mktemp)"
-  if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 30 \
-      -A 'Phobos-Xray-Upstream/1.0' \
-      -o "$tmp" "$input"; then
-    rm -f "$tmp"
-    die "Не удалось скачать subscription URL. Проверь ссылку, DNS и доступ с VPS1."
-  fi
-
-  out="$(python3 - "$tmp" <<'PY_SUBSCRIPTION'
-import base64
-import json
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-data = path.read_bytes()
-texts = []
-
-raw = data.decode('utf-8', 'ignore')
-texts.append(raw)
-
-def walk(obj):
-    if isinstance(obj, str):
-        texts.append(obj)
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            walk(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            walk(v)
-
-try:
-    walk(json.loads(raw))
-except Exception:
-    pass
-
-compact = re.sub(r'\s+', '', raw)
-if compact:
-    pad = '=' * ((4 - len(compact) % 4) % 4)
-    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
-        try:
-            decoded = decoder((compact + pad).encode())
-            texts.append(decoded.decode('utf-8', 'ignore'))
-        except Exception:
-            pass
-
-pattern = re.compile(r"vless://[^\s\"'<>]+", re.IGNORECASE)
-for text in texts:
-    m = pattern.search(text)
-    if m:
-        print(m.group(0).rstrip(' ,;'))
-        sys.exit(0)
-
-sys.exit(2)
-PY_SUBSCRIPTION
-)" || {
-    rm -f "$tmp"
-    die "В subscription не найдена vless:// ссылка. В Remnawave скопируй именно VLESS node link или дай subscription, который содержит vless://."
-  }
-  rm -f "$tmp"
-
-  [[ "$out" == vless://* ]] || die "Subscription скачан, но vless:// ссылка не извлечена"
-  log_success "Из subscription URL извлечена VLESS ссылка"
-  printf '%s\n' "$out"
 }
 
 write_config_from_vless() {
@@ -493,12 +412,11 @@ cmd_configure() {
 
   local link="${1:-}"
   if [[ -z "$link" ]]; then
-    echo "Вставьте vless:// ссылку или Remnawave subscription URL для VPS2."
-    read -r -p "VLESS/subscription: " link
+    echo "Вставьте vless:// ссылку из Remnawave для VPS2."
+    read -r -p "VLESS link: " link
   fi
-  [[ -n "$link" ]] || die "VLESS/subscription ссылка пустая"
+  [[ -n "$link" ]] || die "VLESS ссылка пустая"
 
-  link="$(resolve_vless_link "$link")"
   write_config_from_vless "$link"
   write_fw_script
   write_service
@@ -558,7 +476,7 @@ ensure_configured() {
 cmd="${1:-status}"
 shift || true
 case "$cmd" in
-  configure) cmd_configure "${1:-}" ;;
+  configure|create|remnawave) cmd_configure "${1:-}" ;;
   status) cmd_status ;;
   start) ensure_configured; systemctl start phobos-xray-upstream; cmd_status ;;
   stop) systemctl stop phobos-xray-upstream 2>/dev/null || true; [[ -x "$XRAY_FW" ]] && "$XRAY_FW" down 2>/dev/null || true; cmd_status ;;

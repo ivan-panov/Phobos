@@ -8,6 +8,7 @@ CLIENT_SCRIPT="$SCRIPT_DIR/phobos-client.sh"
 SYSTEM_SCRIPT="$SCRIPT_DIR/phobos-system.sh"
 CONFIG_SCRIPT="$SCRIPT_DIR/vps-obfuscator-config.sh"
 XRAY_SCRIPT="$SCRIPT_DIR/vps-xray-upstream.sh"
+UFW_SCRIPT="$SCRIPT_DIR/phobos-ufw.sh"
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "Требуются root привилегии. Запустите: sudo phobos"
@@ -201,6 +202,76 @@ show_clients_menu() {
   done
 }
 
+
+# Xray / Remnawave Menu
+show_xray_menu() {
+  while true; do
+    show_header
+    echo "XRAY / REMNAWAVE VPS2"
+    echo ""
+    echo "  1) Создать/обновить подключение VPS1 -> VPS2 по vless://"
+    echo "  2) Статус подключения"
+    echo "  3) Перезапустить Xray upstream"
+    echo "  4) Логи Xray upstream"
+    echo "  5) Отключить Xray upstream"
+    echo ""
+    echo "  0) Назад"
+    read -p "Выбор: " choice
+
+    case $choice in
+      1) "$XRAY_SCRIPT" configure; read -p "Enter..." ;;
+      2) "$XRAY_SCRIPT" status; read -p "Enter..." ;;
+      3) "$XRAY_SCRIPT" restart; read -p "Enter..." ;;
+      4) "$XRAY_SCRIPT" logs; read -p "Enter..." ;;
+      5)
+        read -p "Отключить Xray upstream и вернуть NAT через VPS1? [y/N]: " ans
+        [[ "$ans" =~ ^[Yy] ]] && "$XRAY_SCRIPT" disable
+        read -p "Enter..."
+        ;;
+      0) break ;;
+    esac
+  done
+}
+
+
+# Firewall / Ports Menu
+show_firewall_menu() {
+  while true; do
+    show_header
+    echo "ПОРТЫ / FIREWALL"
+    echo ""
+    echo "  1) Показать какие порты нужны Phobos"
+    echo "  2) Проверить открыты порты или нет"
+    echo "  3) Открыть нужные порты UFW"
+    echo "  4) Закрыть порты Phobos в UFW"
+    echo "  5) Показать raw UFW status"
+    echo ""
+    echo "  0) Назад"
+    read -p "Выбор: " choice
+
+    case $choice in
+      1) "$UFW_SCRIPT" status; read -p "Enter..." ;;
+      2) "$UFW_SCRIPT" check; read -p "Enter..." ;;
+      3)
+        echo ""
+        echo "Открою только порты Phobos. SSH не трогаю."
+        read -p "Продолжить? [y/N]: " ans
+        [[ "$ans" =~ ^[Yy] ]] && "$UFW_SCRIPT" open
+        read -p "Enter..."
+        ;;
+      4)
+        echo ""
+        echo "Закрою UFW-правила Phobos. SSH не трогаю."
+        read -p "Продолжить? [y/N]: " ans
+        [[ "$ans" =~ ^[Yy] ]] && "$UFW_SCRIPT" close
+        read -p "Enter..."
+        ;;
+      5) ufw status verbose; read -p "Enter..." ;;
+      0) break ;;
+    esac
+  done
+}
+
 # System Menu
 show_system_menu() {
   while true; do
@@ -211,6 +282,7 @@ show_system_menu() {
     echo "  2) Очистка (токены, мусор)"
     echo "  3) Показать конфиг (env)"
     echo "  4) Показать порты для firewall"
+    echo "  5) Проверить порты / UFW"
     echo ""
     echo "  0) Назад"
     read -p "Выбор: " choice
@@ -219,7 +291,8 @@ show_system_menu() {
       1) "$SYSTEM_SCRIPT" status; read -p "Enter..." ;;
       2) "$SYSTEM_SCRIPT" cleanup; read -p "Enter..." ;;
       3) cat "$PHOBOS_DIR/server/server.env"; echo ""; read -p "Enter..." ;;
-      4) "$SYSTEM_SCRIPT" ports; read -p "Enter..." ;;
+      4) "$UFW_SCRIPT" status; read -p "Enter..." ;;
+      5) "$UFW_SCRIPT" check; read -p "Enter..." ;;
       0) break ;;
     esac
   done
@@ -233,8 +306,9 @@ while true; do
   echo "  1) Управление клиентами"
   echo "  2) Управление службами"
   echo "  3) Настройка Obfuscator"
-  echo "  4) Настройка Xray upstream (VLESS/Remnawave)"
-  echo "  5) Системные функции"
+  echo "  4) Xray / Remnawave VPS2"
+  echo "  5) Порты / Firewall"
+  echo "  6) Системные функции"
   echo ""
   echo "  0) Выход"
   echo ""
@@ -244,8 +318,9 @@ while true; do
     1) show_clients_menu ;; 
     2) show_services_menu ;; 
     3) "$CONFIG_SCRIPT" ;; 
-    4) "$XRAY_SCRIPT" configure ;; 
-    5) show_system_menu ;; 
+    4) show_xray_menu ;; 
+    5) show_firewall_menu ;; 
+    6) show_system_menu ;; 
     0) exit 0 ;; 
     *) echo "Неверный выбор"; sleep 1 ;; 
   esac

@@ -39,7 +39,6 @@ install_git() {
 clone_repository() {
     PHOBOS_BASE_DIR="/opt/Phobos"
     REPO_DIR="$PHOBOS_BASE_DIR/repo"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [ -d "$REPO_DIR" ]; then
         log_message "Удаление существующего репозитория..."
@@ -48,30 +47,25 @@ clone_repository() {
 
     mkdir -p "$REPO_DIR"
 
-    if [ -d "$SCRIPT_DIR/server" ] && [ -d "$SCRIPT_DIR/client" ] && [ -d "$SCRIPT_DIR/wg-obfuscator" ]; then
-        log_message "Использую локальную сборку из архива, GitHub не трогаю..."
-        cp -a "$SCRIPT_DIR/server" "$SCRIPT_DIR/client" "$SCRIPT_DIR/wg-obfuscator" "$REPO_DIR/" || error_exit "Не удалось скопировать локальную сборку"
-    else
-        log_message "Локальная сборка не найдена, загружаю Phobos из GitHub..."
-        cd "$REPO_DIR"
-        git init >/dev/null 2>&1
-        git remote add origin https://github.com/ivan-panov/Phobos.git >/dev/null 2>&1
-        git config core.sparseCheckout true >/dev/null 2>&1
+    log_message "Клонирование репозитория Phobos..."
 
-        echo "server" > .git/info/sparse-checkout
-        echo "client" >> .git/info/sparse-checkout
-        echo "wg-obfuscator" >> .git/info/sparse-checkout
+    cd "$REPO_DIR"
+    git init >/dev/null 2>&1
+    git remote add origin https://github.com/ivan-panov/Phobos.git >/dev/null 2>&1
+    git config core.sparseCheckout true >/dev/null 2>&1
 
-        git pull origin main >/dev/null 2>&1 || error_exit "Не удалось загрузить репозиторий"
-        rm -rf .git >/dev/null 2>&1
-    fi
+    echo "server" > .git/info/sparse-checkout
+    echo "client" >> .git/info/sparse-checkout
+    echo "wg-obfuscator" >> .git/info/sparse-checkout
 
-    find "$REPO_DIR/server" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
-    find "$REPO_DIR/client" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+    git pull origin main >/dev/null 2>&1 || error_exit "Не удалось загрузить репозиторий"
+    rm -rf .git >/dev/null 2>&1
 
-    log_message "Репозиторий подготовлен"
+    find server -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+    find client -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+
+    log_message "Репозиторий загружен"
 }
-
 
 prompt_username() {
     echo
@@ -156,14 +150,6 @@ add_first_client() {
     log_message "Клиент $FIRST_CLIENT создан"
 }
 
-show_ports() {
-    SYSTEM_SCRIPT="/opt/Phobos/repo/server/scripts/phobos-system.sh"
-    if [ -x "$SYSTEM_SCRIPT" ]; then
-        echo ""
-        "$SYSTEM_SCRIPT" ports || true
-    fi
-}
-
 check_root
 install_git
 clone_repository
@@ -171,7 +157,6 @@ prompt_username
 prompt_obfuscation_level
 run_installer
 add_first_client
-show_ports
 
 echo ""
 log_message "=========================================="

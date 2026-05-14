@@ -74,13 +74,13 @@ load_env() {
     fi
   fi
 
-  export OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-1905}"
+  export OBFUSCATOR_PORT="${OBFUSCATOR_PORT:-51821}"
   export OBFUSCATOR_KEY="${OBFUSCATOR_KEY:-KEY}"
   export OBFUSCATOR_DUMMY="${OBFUSCATOR_DUMMY:-4}"
   export OBFUSCATOR_IDLE="${OBFUSCATOR_IDLE:-300}"
-  export OBFUSCATOR_MASKING="${OBFUSCATOR_MASKING:-STUN}"
+  export OBFUSCATOR_MASKING="${OBFUSCATOR_MASKING:-AUTO}"
   export WG_LOCAL_ENDPOINT="${WG_LOCAL_ENDPOINT:-127.0.0.1:51820}"
-  export HTTP_PORT="${HTTP_PORT:-11144}"
+  export HTTP_PORT="${HTTP_PORT:-80}"
   export TOKEN_TTL="${TOKEN_TTL:-86400}"
   export SERVER_PUBLIC_IP_V4="${SERVER_PUBLIC_IP_V4:-0.0.0.0}"
   export SERVER_PUBLIC_IP_V6="${SERVER_PUBLIC_IP_V6:-}"
@@ -97,38 +97,19 @@ ensure_dirs() {
   done
 }
 
-port_in_use() {
-  local port="$1"
-  ss -H -tlnp 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$" && return 0
-  ss -H -ulnp 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$" && return 0
-  return 1
-}
-
 find_free_port() {
   local min=${1:-1024}
   local max=${2:-49151}
   local port
   for _ in {1..100}; do
     port=$((min + RANDOM % (max - min + 1)))
-    if ! port_in_use "$port"; then
+    if ! ss -tlnp | grep -q ":$port " && ! ss -ulnp | grep -q ":$port "; then
       echo "$port"
       return 0
     fi
   done
   return 1
 }
-
-choose_stable_port() {
-  local preferred="$1"
-  local min="${2:-1024}"
-  local max="${3:-49151}"
-  if [[ "$preferred" =~ ^[0-9]+$ ]] && (( preferred >= 1 && preferred <= 65535 )) && ! port_in_use "$preferred"; then
-    echo "$preferred"
-    return 0
-  fi
-  find_free_port "$min" "$max"
-}
-
 
 get_public_ipv4() {
   local iface

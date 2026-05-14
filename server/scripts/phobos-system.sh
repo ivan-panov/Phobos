@@ -105,63 +105,21 @@ action_cleanup() {
 }
 
 
-actual_obfuscator_port() {
-  if [[ -f "$OBF_CONFIG" ]]; then
-    awk -F= '/^[[:space:]]*source-lport[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' "$OBF_CONFIG"
-  fi
-}
-
-write_firewall_ports_file() {
-  load_env
-  local actual_port
-  actual_port=$(actual_obfuscator_port)
-  [[ -n "$actual_port" ]] && OBFUSCATOR_PORT="$actual_port"
-  cat > "$PHOBOS_DIR/server/firewall-ports.txt" <<EOF
-Phobos firewall ports
-=====================
-
-Open these ports on the VPS firewall and in the provider security group:
-
-1) ${OBFUSCATOR_PORT}/udp  - main client connection port (wg-obfuscator)
-2) ${HTTP_PORT}/tcp        - HTTP package/download server
-
-Do NOT expose 51820/udp to the Internet. WireGuard is behind wg-obfuscator.
-
-UFW commands:
-  sudo ufw allow ${OBFUSCATOR_PORT}/udp comment 'Phobos wg-obfuscator'
-  sudo ufw allow ${HTTP_PORT}/tcp comment 'Phobos package HTTP'
-  sudo ufw reload
-
-Provider firewall/security group:
-  UDP ${OBFUSCATOR_PORT}
-  TCP ${HTTP_PORT}
-EOF
-}
-
 action_ports() {
-  load_env
-  local actual_port
-  actual_port=$(actual_obfuscator_port)
-  if [[ -n "$actual_port" && "$actual_port" != "$OBFUSCATOR_PORT" ]]; then
-    log_warn "server.env содержит OBFUSCATOR_PORT=$OBFUSCATOR_PORT, но wg-obfuscator.conf слушает $actual_port. Использую фактический порт $actual_port."
-    OBFUSCATOR_PORT="$actual_port"
+  local ufw_script
+  ufw_script="$(dirname "${BASH_SOURCE[0]}")/phobos-ufw.sh"
+  if [[ -x "$ufw_script" ]]; then
+    "$ufw_script" status
+  else
+    load_env
+    echo "Порты, которые нужно открыть:"
+    echo ""
+    echo "  UDP $OBFUSCATOR_PORT  - основной порт клиентов Phobos / wg-obfuscator"
+    echo "  TCP $HTTP_PORT  - HTTP-сервер для скачивания клиентских пакетов"
+    echo ""
+    echo "Не открывай 51820/udp наружу: WireGuard должен быть скрыт за obfuscator."
   fi
-  write_firewall_ports_file
-  echo "Порты, которые нужно открыть:"
-  echo ""
-  echo "  UDP $OBFUSCATOR_PORT  - основной порт клиентов Phobos / wg-obfuscator"
-  echo "  TCP $HTTP_PORT  - HTTP-сервер для скачивания клиентских пакетов"
-  echo ""
-  echo "Команды для UFW:"
-  echo "  sudo ufw allow $OBFUSCATOR_PORT/udp comment 'Phobos wg-obfuscator'"
-  echo "  sudo ufw allow $HTTP_PORT/tcp comment 'Phobos package HTTP'"
-  echo "  sudo ufw reload"
-  echo ""
-  echo "Провайдерский firewall/security group: UDP $OBFUSCATOR_PORT и TCP $HTTP_PORT"
-  echo "Не открывай 51820/udp наружу: WireGuard должен быть скрыт за obfuscator."
-  echo "Сохранено в: $PHOBOS_DIR/server/firewall-ports.txt"
 }
-
 
 action_monitor() {
   echo "Мониторинг клиентов (Live)..."

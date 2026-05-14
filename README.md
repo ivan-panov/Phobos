@@ -64,8 +64,43 @@ phobos
 - Управление клиентами (создание, удаление, пересоздание конфигураций)
 - Системные функции (health checks, мониторинг клиентов, очистка токенов)
 - Настройка параметров obfuscator (порты, ключи, уровни маскировки, пул адресов)
+- Раздел **Порты / Firewall**: показать нужные порты, открыть/закрыть UFW-правила Phobos, проверить listener и UFW
 - Настройка Xray upstream: подключение VPS1 к VPS2 по `vless://` ссылке из Remnawave и прозрачная маршрутизация трафика WireGuard через VPS2
 
+
+
+## Порты / Firewall
+
+В меню `sudo phobos` добавлен отдельный раздел:
+
+```text
+5) Порты / Firewall
+```
+
+Он умеет:
+
+- показать, какие порты Phobos использует;
+- проверить, слушаются ли порты локально и есть ли правила UFW;
+- открыть нужные правила UFW;
+- закрыть только правила Phobos, не трогая SSH.
+
+CLI-команды без меню:
+
+```bash
+sudo /opt/Phobos/repo/server/scripts/phobos-ufw.sh status
+sudo /opt/Phobos/repo/server/scripts/phobos-ufw.sh check
+sudo /opt/Phobos/repo/server/scripts/phobos-ufw.sh open
+sudo /opt/Phobos/repo/server/scripts/phobos-ufw.sh close
+```
+
+Открывать наружу обычно нужно только:
+
+```text
+UDP <OBFUSCATOR_PORT>  - вход клиентов в wg-obfuscator
+TCP <HTTP_PORT>        - раздача init/package ссылок Phobos
+```
+
+Если включён Xray upstream, Phobos также добавляет UFW-правила только на интерфейс `wg0` для локального TPROXY-порта Xray. `51820/udp` WireGuard наружу не открывается: он остаётся за obfuscator.
 
 ## Xray upstream: VPS1 → VPS2 через Remnawave/VLESS
 
@@ -84,7 +119,7 @@ sudo phobos
 3. Выберите:
 
 ```text
-4) Настройка Xray upstream (VLESS/Remnawave)
+4) Xray / Remnawave VPS2
 ```
 
 4. Вставьте `vless://` ссылку. Скрипт установит Xray, создаст `/opt/Phobos/server/xray-upstream.json`, systemd-сервис `phobos-xray-upstream` и TPROXY правила для `wg0`.
