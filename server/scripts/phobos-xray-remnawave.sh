@@ -13,6 +13,7 @@ SERVICE_FILE="/etc/systemd/system/phobos-xray-remnawave.service"
 SERVICE_NAME="phobos-xray-remnawave"
 XRAY_BIN="/usr/local/bin/xray"
 DEFAULT_TPROXY_PORT="12345"
+DEFAULT_SOCKS_PORT="10808"
 DEFAULT_MARK="1"
 DEFAULT_TABLE="100"
 DEFAULT_WG_IFACE="wg0"
@@ -466,10 +467,30 @@ build_tproxy_inbound() {
   }'
 }
 
+build_socks_test_inbound() {
+  local port="$1"
+  jq -n --argjson port "$port" '{
+    "tag": "phobos-socks-test",
+    "listen": "127.0.0.1",
+    "port": $port,
+    "protocol": "socks",
+    "settings": {
+      "auth": "noauth",
+      "udp": true
+    },
+    "sniffing": {
+      "enabled": true,
+      "destOverride": ["http", "tls", "quic"],
+      "routeOnly": true
+    }
+  }'
+}
+
 normalize_xray_config() {
   local source_file="$1"
   local tag="$2"
   local port="$3"
+  local socks_port="${4:-$DEFAULT_SOCKS_PORT}"
   local tmp_json
   tmp_json=$(mktemp)
 
@@ -500,17 +521,19 @@ normalize_xray_config() {
   proxy_tag=$(jq -r --argjson idx "$first_index" '.outbounds[$idx].tag' "$tagged")
   [[ -n "$proxy_tag" && "$proxy_tag" != "null" ]] || proxy_tag="$tag"
 
-  local inbound
+  local inbound socks_inbound
   inbound=$(build_tproxy_inbound "$port")
+  socks_inbound=$(build_socks_test_inbound "$socks_port")
 
-  jq --argjson inbound "$inbound" --arg proxy_tag "$proxy_tag" '
+  jq --argjson inbound "$inbound" --argjson socks_inbound "$socks_inbound" --arg proxy_tag "$proxy_tag" '
     .log = (.log // {"loglevel": "warning"})
-    | .inbounds = ([.inbounds[]? | select((.tag // "") != "phobos-tproxy")] | [$inbound] + .)
+    | .inbounds = ([.inbounds[]? | select(((.tag // "") != "phobos-tproxy") and ((.tag // "") != "phobos-socks-test"))] | [$inbound, $socks_inbound] + .)
     | .routing = (.routing // {})
     | .routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")
     | .routing.rules = ([
+        {"type": "field", "inboundTag": ["phobos-socks-test"], "outboundTag": $proxy_tag},
         {"type": "field", "inboundTag": ["phobos-tproxy"], "outboundTag": $proxy_tag}
-      ] + ((.routing.rules // []) | map(select(((.inboundTag // []) | tostring | contains("phobos-tproxy")) | not))))
+      ] + ((.routing.rules // []) | map(select((((.inboundTag // []) | tostring | contains("phobos-tproxy")) or (((.inboundTag // []) | tostring | contains("phobos-socks-test"))) | not))))
   ' "$tagged" > "$XRAY_CONFIG"
 
   chmod 600 "$XRAY_CONFIG"
@@ -529,6 +552,7 @@ write_env() {
   local mark="$4"
   local table="$5"
   local wg_iface="$6"
+  local socks_port="${7:-$DEFAULT_SOCKS_PORT}"
 
   {
     printf 'SUBSCRIPTION_URL=%q\n' "$sub_url"
@@ -537,6 +561,7 @@ write_env() {
     printf 'TPROXY_MARK=%q\n' "$mark"
     printf 'TPROXY_TABLE=%q\n' "$table"
     printf 'WG_IFACE=%q\n' "$wg_iface"
+    printf 'SOCKS_TEST_PORT=%q\n' "$socks_port"
     printf 'REMNAWAVE_USER_AGENT=%q\n' "${REMNAWAVE_USER_AGENT:-$DEFAULT_REMNAWAVE_UA}"
     printf 'REMNAWAVE_HWID=%q\n' "$(machine_hwid)"
   } > "$XRAY_ENV"
@@ -684,6 +709,7 @@ configure() {
   local sub_url="$1"
   local tag="${2:-$DEFAULT_OUTBOUND_TAG}"
   local tproxy_port="${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
+  local socks_port="${SOCKS_TEST_PORT:-$DEFAULT_SOCKS_PORT}"
   local mark="${TPROXY_MARK:-$DEFAULT_MARK}"
   local table="${TPROXY_TABLE:-$DEFAULT_TABLE}"
   local wg_iface="${WG_IFACE:-$DEFAULT_WG_IFACE}"
@@ -698,10 +724,10 @@ configure() {
   local raw
   raw=$(mktemp)
   fetch_subscription "$sub_url" "$raw"
-  normalize_xray_config "$raw" "$tag" "$tproxy_port"
+  normalize_xray_config "$raw" "$tag" "$tproxy_port" "$socks_port"
   rm -f "$raw"
 
-  write_env "$sub_url" "$tag" "$tproxy_port" "$mark" "$table" "$wg_iface"
+  write_env "$sub_url" "$tag" "$tproxy_port" "$mark" "$table" "$wg_iface" "$socks_port"
   write_routing_script "$tproxy_port" "$mark" "$table" "$wg_iface"
   write_service
   test_xray_config
@@ -720,7 +746,7 @@ refresh() {
   local raw
   raw=$(mktemp)
   fetch_subscription "$SUBSCRIPTION_URL" "$raw"
-  normalize_xray_config "$raw" "${OUTBOUND_TAG:-$DEFAULT_OUTBOUND_TAG}" "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
+  normalize_xray_config "$raw" "${OUTBOUND_TAG:-$DEFAULT_OUTBOUND_TAG}" "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}" "${SOCKS_TEST_PORT:-$DEFAULT_SOCKS_PORT}"
   rm -f "$raw"
   test_xray_config
   systemctl restart "$SERVICE_NAME"
@@ -761,6 +787,9 @@ status() {
   echo "== tproxy rules =="
   iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || echo "no PHOBOS_XRAY chain"
   echo
+  echo "== local SOCKS test listener =="
+  ss -lntup 2>/dev/null | grep -E ":${SOCKS_TEST_PORT:-10808}\b" || echo "SOCKS test listener not found"
+  echo
   echo "== VPS1 leak kill-switch: direct wg0 -> WAN blocked =="
   iptables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv4 kill-switch rule not found"
   ip6tables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv6 kill-switch rule not found or IPv6 disabled"
@@ -771,6 +800,35 @@ show_config() {
   jq . "$XRAY_CONFIG"
 }
 
+test_connection() {
+  require_root
+  [[ -f "$XRAY_ENV" ]] || die "No saved configuration. Run: $0 configure <remnawave_subscription_url> [tag]"
+  # shellcheck disable=SC1090
+  source "$XRAY_ENV"
+  local socks_port="${SOCKS_TEST_PORT:-$DEFAULT_SOCKS_PORT}"
+
+  systemctl is-active --quiet "$SERVICE_NAME" || systemctl start "$SERVICE_NAME"
+
+  echo "== Xray service =="
+  systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,18p' || true
+  echo
+  echo "== Local SOCKS test, should trigger Remnawave online status =="
+  echo "Using socks5h://127.0.0.1:${socks_port}"
+
+  local rc=0
+  curl -4 -sS --max-time 25 --socks5-hostname "127.0.0.1:${socks_port}" https://api.ipify.org || rc=$?
+  echo
+
+  if [[ "$rc" -eq 0 ]]; then
+    log_ok "VPS1 -> Xray -> Remnawave/VPS2 test request succeeded. Refresh Remnawave: the user should no longer show 'Не подключался'."
+    return 0
+  fi
+
+  log_err "SOCKS test failed. Last Xray logs:"
+  journalctl -u "$SERVICE_NAME" -n 80 --no-pager || true
+  die "Xray did not establish a working outbound connection to the Remnawave node. Check subscription, HWID, node status, SNI/REALITY settings, firewall, and system time."
+}
+
 usage() {
   cat <<EOF
 Usage:
@@ -779,10 +837,11 @@ Usage:
   $0 enable
   $0 disable
   $0 status
+  $0 test
   $0 show-config
 
 Environment overrides for configure:
-  TPROXY_PORT=$DEFAULT_TPROXY_PORT TPROXY_MARK=$DEFAULT_MARK TPROXY_TABLE=$DEFAULT_TABLE WG_IFACE=$DEFAULT_WG_IFACE
+  TPROXY_PORT=$DEFAULT_TPROXY_PORT SOCKS_TEST_PORT=$DEFAULT_SOCKS_PORT TPROXY_MARK=$DEFAULT_MARK TPROXY_TABLE=$DEFAULT_TABLE WG_IFACE=$DEFAULT_WG_IFACE
   REMNAWAVE_USER_AGENT=$DEFAULT_REMNAWAVE_UA REMNAWAVE_HWID=<stable-device-id>
 EOF
 }
@@ -803,6 +862,9 @@ case "${1:-}" in
     ;;
   status)
     status
+    ;;
+  test)
+    test_connection
     ;;
   show-config)
     show_config

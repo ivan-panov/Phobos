@@ -73,22 +73,31 @@ Phobos can route traffic from WireGuard clients through a second VPS managed by 
 Client/router -> VPS1 Phobos WireGuard/wg-obfuscator -> local Xray on VPS1 -> VPS2 Remnawave outbound -> Internet
 ```
 
-Run this on **VPS1** after the normal Phobos installation. VPS2 is the Remnawave/Xray server from the subscription URL; Phobos does not install anything on VPS2 in this mode.
+Run this on **VPS1** after the normal Phobos installation. VPS2 is the Remnawave/Xray server from the subscription URL; Phobos does not install anything on VPS2 in this mode. Use the real **user subscription URL** from Remnawave, not the admin panel URL and not the literal placeholder below. The script now sends a normal `v2rayNG/1.10.5` User-Agent, adds a stable `x-hwid` header, and automatically retries the explicit `/json` endpoint when the bare URL returns HTML/fallback content.
 
 ```bash
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://<remnawave-subscription-url>/json" vps2-remnawave
+sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>" vps2-remnawave
+
+# Or force Xray JSON explicitly:
+sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>/json" vps2-remnawave
+
+# If Remnawave HWID is enabled and you want a specific device id:
+sudo REMNAWAVE_HWID="phobos-vps1-main" /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>/json" vps2-remnawave
 ```
 
 Useful commands:
 
 ```bash
 sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh status
+sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh test
 sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh refresh
 sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh disable
 sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh enable
 ```
 
-The script prefers a Remnawave Xray JSON subscription. If the URL returns base64/plain share links, the first supported `vless://`, `vmess://`, or `trojan://` link is converted into an Xray outbound. Routing is done on VPS1 with an Xray TPROXY inbound and iptables mangle rules applied only to traffic entering from `wg0`. A fail-closed kill-switch blocks direct `wg0 -> VPS1 WAN` forwarding, so if Xray/VPS2 is unavailable, client traffic fails instead of leaking through the VPS1 public IP.
+The script prefers a Remnawave Xray JSON subscription. If the URL returns base64/plain share links, the first supported `vless://`, `vmess://`, `trojan://`, or `ss://` link is converted into an Xray outbound. Routing is done on VPS1 with an Xray TPROXY inbound and iptables mangle rules applied only to traffic entering from `wg0`. A local SOCKS test inbound is also bound to `127.0.0.1:10808`; it is not exposed publicly and exists only so `phobos-xray-remnawave.sh test` can force a real VPS1 -> Xray -> Remnawave/VPS2 request. A fail-closed kill-switch blocks direct `wg0 -> VPS1 WAN` forwarding, so if Xray/VPS2 is unavailable, client traffic fails instead of leaking through the VPS1 public IP.
+
+Remnawave showing `Не подключался` only means the user has not made a real Xray connection yet. Fetching the subscription URL alone does not count as a connection. Run the `test` command above or send traffic from a WireGuard client through VPS1, then refresh the Remnawave page.
 
 The same workflow is available in the `phobos` menu: `VPS1 -> VPS2 Remnawave via Xray`.
 
