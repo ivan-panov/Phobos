@@ -73,6 +73,7 @@ print_ports_plan() {
   echo "    - ${XRAY_PROXY_PORT_EFFECTIVE}/udp: локальный TPROXY вход Xray"
   echo "  НЕ ОТКРЫВАТЬ наружу:"
   echo "    - 51820/udp WireGuard, если endpoint ${PHOBOS_WG_ENDPOINT} локальный/за obfuscator"
+  echo "    - 12346/tcp Xray keepalive SOCKS: только 127.0.0.1, наружу не нужен"
   echo ""
   echo "SSH-порт не трогаю, чтобы не отрезать доступ к VPS."
 }

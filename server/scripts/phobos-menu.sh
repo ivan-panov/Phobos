@@ -212,8 +212,9 @@ show_xray_menu() {
     echo "  1) Создать/обновить подключение VPS1 -> VPS2 по vless://"
     echo "  2) Статус подключения"
     echo "  3) Перезапустить Xray upstream"
-    echo "  4) Логи Xray upstream"
-    echo "  5) Отключить Xray upstream"
+    echo "  4) Логи Xray upstream / keepalive"
+    echo "  5) Проверить/создать исходящее соединение сейчас"
+    echo "  6) Отключить Xray upstream"
     echo ""
     echo "  0) Назад"
     read -p "Выбор: " choice
@@ -223,7 +224,8 @@ show_xray_menu() {
       2) "$XRAY_SCRIPT" status; read -p "Enter..." ;;
       3) "$XRAY_SCRIPT" restart; read -p "Enter..." ;;
       4) "$XRAY_SCRIPT" logs; read -p "Enter..." ;;
-      5)
+      5) "$XRAY_SCRIPT" probe; read -p "Enter..." ;;
+      6)
         read -p "Отключить Xray upstream и вернуть NAT через VPS1? [y/N]: " ans
         [[ "$ans" =~ ^[Yy] ]] && "$XRAY_SCRIPT" disable
         read -p "Enter..."

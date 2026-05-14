@@ -13,25 +13,32 @@ XRAY_CONFIG="$PHOBOS_DIR/server/xray-upstream.json"
 XRAY_META="$PHOBOS_DIR/server/xray-upstream.env"
 XRAY_FW="$PHOBOS_DIR/server/xray-upstream-fw.sh"
 XRAY_SERVICE="/etc/systemd/system/phobos-xray-upstream.service"
+XRAY_KEEPALIVE_SERVICE="/etc/systemd/system/phobos-xray-keepalive.service"
+XRAY_KEEPALIVE_TIMER="/etc/systemd/system/phobos-xray-keepalive.timer"
+XRAY_KEEPALIVE_SCRIPT="$PHOBOS_DIR/server/xray-upstream-keepalive.sh"
 XRAY_BIN="/usr/local/bin/xray"
 TPROXY_PORT="${TPROXY_PORT:-${XRAY_TPROXY_PORT:-12345}}"
 TPROXY_MARK="${TPROXY_MARK:-${XRAY_TPROXY_MARK:-1}}"
 TPROXY_TABLE="${TPROXY_TABLE:-${XRAY_TPROXY_TABLE:-100}}"
 WG_IFACE="${WG_IFACE:-${XRAY_WG_IFACE:-wg0}}"
+KEEPALIVE_PORT="${KEEPALIVE_PORT:-${XRAY_KEEPALIVE_PORT:-12346}}"
+KEEPALIVE_URL="${KEEPALIVE_URL:-${XRAY_KEEPALIVE_URL:-https://www.gstatic.com/generate_204}}"
+KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-${XRAY_KEEPALIVE_INTERVAL:-60}}"
 
 usage() {
   cat <<USAGE
-Usage: $0 {configure|create|status|start|stop|restart|disable|logs}
+Usage: $0 {configure|create|status|probe|start|stop|restart|disable|logs}
 
 configure  - настроить VPS1 как Xray/VLESS клиент к VPS2 (Remnawave vless:// link)
 create     - алиас configure
-status     - показать состояние upstream
-start      - запустить phobos-xray-upstream
-stop       - остановить phobos-xray-upstream и снять TPROXY правила
-restart    - перезапустить upstream
+status     - показать состояние upstream и keepalive
+probe      - сразу создать исходящее Xray-соединение через keepalive-запрос
+start      - запустить phobos-xray-upstream и keepalive timer
+stop       - остановить phobos-xray-upstream, keepalive timer и снять TPROXY правила
+restart    - перезапустить upstream и keepalive timer
 logs       - показать логи сервиса
 
-disable    - отключить upstream, удалить systemd service и TPROXY правила
+disable    - отключить upstream, удалить systemd service, keepalive и TPROXY правила
 USAGE
 }
 
@@ -197,6 +204,12 @@ config = {
             'destOverride': ['http', 'tls', 'quic'],
             'routeOnly': False,
         },
+    }, {
+        'tag': 'phobos-keepalive-socks',
+        'listen': '127.0.0.1',
+        'port': 12346,
+        'protocol': 'socks',
+        'settings': {'auth': 'noauth', 'udp': False},
     }],
     'outbounds': [
         outbound,
@@ -206,6 +219,10 @@ config = {
     'routing': {
         'domainStrategy': 'IPIfNonMatch',
         'rules': [{
+            'type': 'field',
+            'inboundTag': ['phobos-keepalive-socks'],
+            'outboundTag': 'vps2-vless',
+        }, {
             'type': 'field',
             'ip': [
                 '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
@@ -232,7 +249,7 @@ PY
   tmp_json="$(mktemp)"
   printf '%s\n' "$parsed_json" > "$tmp_json"
 
-  TPROXY_PORT="$TPROXY_PORT" jq '.config | .inbounds[0].port = (env.TPROXY_PORT | tonumber)' "$tmp_json" > "$XRAY_CONFIG"
+  TPROXY_PORT="$TPROXY_PORT" KEEPALIVE_PORT="$KEEPALIVE_PORT" jq '.config | .inbounds[0].port = (env.TPROXY_PORT | tonumber) | .inbounds[1].port = (env.KEEPALIVE_PORT | tonumber)' "$tmp_json" > "$XRAY_CONFIG"
   chmod 600 "$XRAY_CONFIG"
 
   {
@@ -241,6 +258,10 @@ PY
     echo "XRAY_TPROXY_MARK=$TPROXY_MARK"
     echo "XRAY_TPROXY_TABLE=$TPROXY_TABLE"
     echo "XRAY_WG_IFACE=$WG_IFACE"
+    echo "XRAY_KEEPALIVE_ENABLED=1"
+    echo "XRAY_KEEPALIVE_PORT=$KEEPALIVE_PORT"
+    echo "XRAY_KEEPALIVE_URL=$KEEPALIVE_URL"
+    echo "XRAY_KEEPALIVE_INTERVAL=$KEEPALIVE_INTERVAL"
     echo "XRAY_VPS2_ADDRESS=$(jq -r '.meta.address' "$tmp_json")"
     echo "XRAY_VPS2_PORT=$(jq -r '.meta.port' "$tmp_json")"
     echo "XRAY_VLESS_NETWORK=$(jq -r '.meta.network' "$tmp_json")"
@@ -359,6 +380,64 @@ FW_SCRIPT
   chmod 700 "$XRAY_FW"
 }
 
+write_keepalive_script() {
+  cat > "$XRAY_KEEPALIVE_SCRIPT" <<KEEPALIVE_SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+META="$XRAY_META"
+if [[ -f "\$META" ]]; then
+  # shellcheck disable=SC1090
+  source "\$META"
+fi
+
+PORT="\${XRAY_KEEPALIVE_PORT:-$KEEPALIVE_PORT}"
+URL="\${XRAY_KEEPALIVE_URL:-$KEEPALIVE_URL}"
+
+command -v curl >/dev/null 2>&1 || { echo "curl is not installed" >&2; exit 1; }
+command -v systemctl >/dev/null 2>&1 || { echo "systemctl is not available" >&2; exit 1; }
+
+systemctl is-active --quiet phobos-xray-upstream || { echo "phobos-xray-upstream is not active" >&2; exit 1; }
+
+# Этот запрос не зависит от клиентов Phobos. Он сам создаёт исходящее
+# соединение через локальный SOCKS inbound Xray и outbound VPS2/VLESS.
+exec curl --socks5-hostname "127.0.0.1:\${PORT}"   --connect-timeout 8   --max-time 15   -fsS   -o /dev/null   "\$URL"
+KEEPALIVE_SCRIPT
+  chmod 700 "$XRAY_KEEPALIVE_SCRIPT"
+}
+
+write_keepalive_units() {
+  cat > "$XRAY_KEEPALIVE_SERVICE" <<KEEPALIVE_SERVICE
+[Unit]
+Description=Phobos Xray upstream keepalive probe
+After=network-online.target phobos-xray-upstream.service
+Wants=network-online.target phobos-xray-upstream.service
+
+[Service]
+Type=oneshot
+ExecStart=$XRAY_KEEPALIVE_SCRIPT
+StandardOutput=journal
+StandardError=journal
+KEEPALIVE_SERVICE
+
+  cat > "$XRAY_KEEPALIVE_TIMER" <<KEEPALIVE_TIMER
+[Unit]
+Description=Run Phobos Xray keepalive without waiting for client traffic
+
+[Timer]
+OnBootSec=20sec
+OnUnitActiveSec=${KEEPALIVE_INTERVAL}s
+AccuracySec=10s
+Unit=phobos-xray-keepalive.service
+
+[Install]
+WantedBy=timers.target
+KEEPALIVE_TIMER
+
+  systemctl daemon-reload
+  systemctl enable phobos-xray-keepalive.timer >/dev/null
+}
+
 write_service() {
   cat > "$XRAY_SERVICE" <<SERVICE
 [Unit]
@@ -370,6 +449,7 @@ Wants=network-online.target wg-quick@${WG_IFACE}.service
 Type=simple
 ExecStartPre=$XRAY_FW up
 ExecStart=$XRAY_BIN run -config $XRAY_CONFIG
+ExecStartPost=/bin/bash -lc 'sleep 2; $XRAY_KEEPALIVE_SCRIPT || true'
 ExecStopPost=$XRAY_FW down
 Restart=on-failure
 RestartSec=5
@@ -400,6 +480,10 @@ update_server_env() {
   append_env_if_missing "XRAY_TPROXY_MARK" "$TPROXY_MARK"
   append_env_if_missing "XRAY_TPROXY_TABLE" "$TPROXY_TABLE"
   append_env_if_missing "XRAY_WG_IFACE" "$WG_IFACE"
+  append_env_if_missing "XRAY_KEEPALIVE_ENABLED" "1"
+  append_env_if_missing "XRAY_KEEPALIVE_PORT" "$KEEPALIVE_PORT"
+  append_env_if_missing "XRAY_KEEPALIVE_URL" "$KEEPALIVE_URL"
+  append_env_if_missing "XRAY_KEEPALIVE_INTERVAL" "$KEEPALIVE_INTERVAL"
 }
 
 validate_config() {
@@ -419,13 +503,21 @@ cmd_configure() {
 
   write_config_from_vless "$link"
   write_fw_script
+  write_keepalive_script
   write_service
+  write_keepalive_units
   update_server_env
 
   log_info "Проверка Xray config..."
   validate_config || die "Xray не принял конфиг: $XRAY_CONFIG"
 
   systemctl restart phobos-xray-upstream
+  systemctl enable --now phobos-xray-keepalive.timer >/dev/null
+  if cmd_probe >/dev/null 2>&1; then
+    log_success "Keepalive проверка прошла: Xray создал исходящее соединение к VPS2 без запросов клиентов."
+  else
+    log_warn "Keepalive проверка сейчас не прошла. Таймер продолжит пробовать; смотрите: journalctl -u phobos-xray-keepalive -n 80 --no-pager"
+  fi
   log_success "VPS1 подключен к VPS2 через Xray/VLESS. Трафик ${WG_IFACE} теперь уходит через upstream."
   cmd_status
 }
@@ -440,6 +532,7 @@ cmd_status() {
     echo "VPS2:      ${XRAY_VPS2_ADDRESS:-?}:${XRAY_VPS2_PORT:-?}"
     echo "Transport: ${XRAY_VLESS_NETWORK:-?} / ${XRAY_VLESS_SECURITY:-?}"
     echo "SNI:       ${XRAY_VLESS_SNI:-?}"
+    echo "Keepalive: 127.0.0.1:${XRAY_KEEPALIVE_PORT:-$KEEPALIVE_PORT} -> ${XRAY_KEEPALIVE_URL:-$KEEPALIVE_URL} every ${XRAY_KEEPALIVE_INTERVAL:-$KEEPALIVE_INTERVAL}s"
   else
     echo "Конфиг upstream ещё не создан. Запустите: $0 configure"
   fi
@@ -450,6 +543,12 @@ cmd_status() {
   [[ -z "$enabled" || "$enabled" == "not-found" ]] && enabled="disabled"
   echo "Service:   $active"
   echo "Enabled:   $enabled"
+  local keepalive_timer keepalive_enabled
+  keepalive_timer="$(systemctl is-active phobos-xray-keepalive.timer 2>/dev/null || true)"
+  keepalive_enabled="$(systemctl is-enabled phobos-xray-keepalive.timer 2>/dev/null || true)"
+  [[ -z "$keepalive_timer" || "$keepalive_timer" == "not-found" ]] && keepalive_timer="inactive"
+  [[ -z "$keepalive_enabled" || "$keepalive_enabled" == "not-found" ]] && keepalive_enabled="disabled"
+  echo "Keepalive timer: $keepalive_timer / $keepalive_enabled"
   echo "Config:    $XRAY_CONFIG"
   echo "Firewall:  $XRAY_FW"
   echo "iptables:  $(iptables -V 2>/dev/null || echo unavailable)"
@@ -458,13 +557,23 @@ cmd_status() {
   iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || true
 }
 
+cmd_probe() {
+  [[ -x "$XRAY_KEEPALIVE_SCRIPT" ]] || die "Keepalive script не найден. Запустите: $0 configure"
+  log_info "Создаю исходящее Xray-соединение без клиентского трафика..."
+  "$XRAY_KEEPALIVE_SCRIPT"
+  log_success "Keepalive OK: outbound VPS2 проверен через локальный SOCKS inbound Xray."
+}
+
 cmd_disable() {
+  systemctl stop phobos-xray-keepalive.timer phobos-xray-keepalive.service 2>/dev/null || true
+  systemctl disable phobos-xray-keepalive.timer 2>/dev/null || true
   systemctl stop phobos-xray-upstream 2>/dev/null || true
   systemctl disable phobos-xray-upstream 2>/dev/null || true
   [[ -x "$XRAY_FW" ]] && "$XRAY_FW" down 2>/dev/null || true
-  rm -f "$XRAY_SERVICE"
+  rm -f "$XRAY_SERVICE" "$XRAY_KEEPALIVE_SERVICE" "$XRAY_KEEPALIVE_TIMER" "$XRAY_KEEPALIVE_SCRIPT"
   systemctl daemon-reload
   append_env_if_missing "XRAY_UPSTREAM_ENABLED" "0"
+  append_env_if_missing "XRAY_KEEPALIVE_ENABLED" "0"
   log_success "Xray upstream отключен. Phobos снова выходит напрямую через NAT VPS1."
 }
 
@@ -478,10 +587,11 @@ shift || true
 case "$cmd" in
   configure|create|remnawave) cmd_configure "${1:-}" ;;
   status) cmd_status ;;
-  start) ensure_configured; systemctl start phobos-xray-upstream; cmd_status ;;
-  stop) systemctl stop phobos-xray-upstream 2>/dev/null || true; [[ -x "$XRAY_FW" ]] && "$XRAY_FW" down 2>/dev/null || true; cmd_status ;;
-  restart) ensure_configured; systemctl restart phobos-xray-upstream; cmd_status ;;
-  logs) journalctl -u phobos-xray-upstream -n 80 --no-pager 2>/dev/null || true ;;
+  probe|keepalive) ensure_configured; cmd_probe ;;
+  start) ensure_configured; systemctl start phobos-xray-upstream; systemctl start phobos-xray-keepalive.timer 2>/dev/null || true; cmd_status ;;
+  stop) systemctl stop phobos-xray-keepalive.timer phobos-xray-keepalive.service 2>/dev/null || true; systemctl stop phobos-xray-upstream 2>/dev/null || true; [[ -x "$XRAY_FW" ]] && "$XRAY_FW" down 2>/dev/null || true; cmd_status ;;
+  restart) ensure_configured; systemctl restart phobos-xray-upstream; systemctl restart phobos-xray-keepalive.timer 2>/dev/null || true; cmd_status ;;
+  logs) journalctl -u phobos-xray-upstream -u phobos-xray-keepalive -n 120 --no-pager 2>/dev/null || true ;;
   disable) cmd_disable ;;
   *) usage; exit 1 ;;
 esac

@@ -11,7 +11,7 @@
 - **Серверная часть** - автоматизация развертывания WireGuard с обфускацией на VPS
 - **Клиентская часть** - установщики для роутеров (Keenetic/Netcraze, OpenWrt, ImmortalWrt) и Linux систем
 - **Интеграция с 3x-ui** - поддержка установки только obfuscator для работы с панелью 3x-ui
-- **Xray upstream к VPS2** - режим VPS1 → VPS2 через Remnawave/VLESS: клиенты Phobos подключаются к VPS1, а внешний трафик уходит через Xray на VPS2
+- **Xray upstream к VPS2** - режим VPS1 → VPS2 через Remnawave/VLESS: клиенты Phobos подключаются к VPS1, внешний трафик уходит через Xray на VPS2, а keepalive сам создаёт исходящее соединение без ожидания запросов клиентов
 
 ## Быстрый старт
 
@@ -122,7 +122,9 @@ sudo phobos
 4) Xray / Remnawave VPS2
 ```
 
-4. Вставьте `vless://` ссылку. Скрипт установит Xray, создаст `/opt/Phobos/server/xray-upstream.json`, systemd-сервис `phobos-xray-upstream` и TPROXY правила для `wg0`.
+4. Вставьте `vless://` ссылку. Скрипт установит Xray, создаст `/opt/Phobos/server/xray-upstream.json`, systemd-сервис `phobos-xray-upstream`, keepalive-таймер `phobos-xray-keepalive.timer` и TPROXY правила для `wg0`.
+
+После настройки Xray не ждёт запросов клиентов Phobos: локальный SOCKS inbound `127.0.0.1:12346` и таймер keepalive сами делают короткий исходящий запрос через outbound VPS2/VLESS. Это принудительно поднимает/проверяет соединение VPS1 → VPS2 сразу после старта и затем периодически.
 
 То же самое можно выполнить без меню:
 
@@ -134,6 +136,7 @@ sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh configure 'vless://UUI
 
 ```bash
 sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh status
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh probe
 sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh restart
 sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh logs
 sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh disable
@@ -142,6 +145,29 @@ sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh disable
 После `disable` Phobos возвращается к обычному режиму: клиенты выходят напрямую через NAT VPS1.
 
 Поддерживаются типовые VLESS параметры Remnawave/Xray: `security=tls`, `security=reality`, `type=tcp/raw`, `ws/websocket`, `grpc`, `httpupgrade`, `xhttp/splithttp`, `flow`, `sni`, `fp`, `pbk`, `sid`, `path`, `host`.
+
+### Keepalive без запросов клиентов
+
+По умолчанию создаётся дополнительный локальный inbound Xray:
+
+```text
+127.0.0.1:12346 socks noauth
+```
+
+Команда `probe` делает запрос через этот inbound и outbound `vps2-vless`, поэтому соединение VPS1 → VPS2 создаётся даже когда клиенты Phobos молчат:
+
+```bash
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh probe
+journalctl -u phobos-xray-keepalive -n 80 --no-pager
+```
+
+Настройки можно переопределить в `/opt/Phobos/server/server.env` перед повторным `configure`:
+
+```env
+XRAY_KEEPALIVE_PORT=12346
+XRAY_KEEPALIVE_URL=https://www.gstatic.com/generate_204
+XRAY_KEEPALIVE_INTERVAL=60
+```
 
 ## Удаление
 
