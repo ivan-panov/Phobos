@@ -11,6 +11,7 @@
 - **Серверная часть** - автоматизация развертывания WireGuard с обфускацией на VPS
 - **Клиентская часть** - установщики для роутеров (Keenetic/Netcraze, OpenWrt, ImmortalWrt) и Linux систем
 - **Интеграция с 3x-ui** - поддержка установки только obfuscator для работы с панелью 3x-ui
+- **Xray upstream к VPS2** - режим VPS1 → VPS2 через Remnawave/VLESS: клиенты Phobos подключаются к VPS1, а внешний трафик уходит через Xray на VPS2
 
 ## Быстрый старт
 
@@ -19,7 +20,7 @@
 Запустите установку:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ivan-panov/Phobos/main/phobos-deploy.sh)" </dev/tty
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ground-Zerro/Phobos/main/phobos-deploy.sh)" </dev/tty
 ```
 
 ### 2. Установка на клиенте
@@ -63,43 +64,49 @@ phobos
 - Управление клиентами (создание, удаление, пересоздание конфигураций)
 - Системные функции (health checks, мониторинг клиентов, очистка токенов)
 - Настройка параметров obfuscator (порты, ключи, уровни маскировки, пул адресов)
+- Настройка Xray upstream: подключение VPS1 к VPS2 по `vless://` ссылке из Remnawave и прозрачная маршрутизация трафика WireGuard через VPS2
 
 
-## VPS1 -> VPS2 Remnawave via Xray
+## Xray upstream: VPS1 → VPS2 через Remnawave/VLESS
 
-Phobos can route traffic from WireGuard clients through a second VPS managed by Remnawave. The topology is:
+Этот режим нужен, если Phobos стоит на **VPS1**, но внешний IP клиентов должен быть **VPS2**.
+VPS1 остаётся точкой входа WireGuard/obfuscator, а весь TCP/UDP трафик клиентов с интерфейса `wg0` прозрачно перехватывается через TPROXY и отправляется Xray-клиентом на VLESS inbound VPS2.
+
+### Быстрая настройка
+
+1. В Remnawave скопируйте `vless://...` ссылку клиента для VPS2.
+2. На VPS1 откройте меню:
+
+```bash
+sudo phobos
+```
+
+3. Выберите:
 
 ```text
-Client/router -> VPS1 Phobos WireGuard/wg-obfuscator -> local Xray on VPS1 -> VPS2 Remnawave outbound -> Internet
+4) Настройка Xray upstream (VLESS/Remnawave)
 ```
 
-Run this on **VPS1** after the normal Phobos installation. VPS2 is the Remnawave/Xray server from the subscription URL; Phobos does not install anything on VPS2 in this mode. Use the real **user subscription URL** from Remnawave, not the admin panel URL and not the literal placeholder below. The script now sends a normal `v2rayNG/1.10.5` User-Agent, adds a stable `x-hwid` header, and automatically retries the explicit `/json` endpoint when the bare URL returns HTML/fallback content.
+4. Вставьте `vless://` ссылку. Скрипт установит Xray, создаст `/opt/Phobos/server/xray-upstream.json`, systemd-сервис `phobos-xray-upstream` и TPROXY правила для `wg0`.
+
+То же самое можно выполнить без меню:
 
 ```bash
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>" vps2-remnawave
-
-# Or force Xray JSON explicitly:
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>/json" vps2-remnawave
-
-# If Remnawave HWID is enabled and you want a specific device id:
-sudo REMNAWAVE_HWID="phobos-vps1-main" /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure "https://sub.example.com/<shortUuid>/json" vps2-remnawave
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh configure 'vless://UUID@VPS2:443?...'
 ```
 
-Useful commands:
+### Управление
 
 ```bash
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh status
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh test
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh refresh
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh disable
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh enable
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh status
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh restart
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh logs
+sudo /opt/Phobos/repo/server/scripts/vps-xray-upstream.sh disable
 ```
 
-The script prefers a Remnawave Xray JSON subscription. If the URL returns base64/plain share links, the first supported `vless://`, `vmess://`, `trojan://`, or `ss://` link is converted into an Xray outbound. Routing is done on VPS1 with an Xray TPROXY inbound and iptables mangle rules applied only to traffic entering from `wg0`. A local SOCKS test inbound is also bound to `127.0.0.1:10808`; it is not exposed publicly and exists only so `phobos-xray-remnawave.sh test` can force a real VPS1 -> Xray -> Remnawave/VPS2 request. A fail-closed kill-switch blocks direct `wg0 -> VPS1 WAN` forwarding, so if Xray/VPS2 is unavailable, client traffic fails instead of leaking through the VPS1 public IP.
+После `disable` Phobos возвращается к обычному режиму: клиенты выходят напрямую через NAT VPS1.
 
-Remnawave showing `Не подключался` only means the user has not made a real Xray connection yet. Fetching the subscription URL alone does not count as a connection. Run the `test` command above or send traffic from a WireGuard client through VPS1, then refresh the Remnawave page.
-
-The same workflow is available in the `phobos` menu: `VPS1 -> VPS2 Remnawave via Xray`.
+Поддерживаются типовые VLESS параметры Remnawave/Xray: `security=tls`, `security=reality`, `type=tcp/raw`, `ws/websocket`, `grpc`, `httpupgrade`, `xhttp/splithttp`, `flow`, `sni`, `fp`, `pbk`, `sid`, `path`, `host`.
 
 ## Удаление
 
@@ -183,12 +190,3 @@ See the [LICENSE](./LICENSE) file for full terms.
 ## Поддержка
 
 **Угостить автора чашечкой какао можно на** [Boosty](https://boosty.to/ground_zerro) ❤️
-
-
-### Remnawave direct node link fallback
-
-If the subscription URL returns share links and you want to pin a single node, you can configure Phobos with one direct `vless://`, `vmess://`, `trojan://`, or `ss://` share link instead of the subscription URL. Always quote the link because it contains `&` and `#` characters.
-
-```bash
-sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure 'vless://uuid@example.com:443?...#Node' Finland
-```

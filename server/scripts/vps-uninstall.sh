@@ -16,7 +16,7 @@ echo ""
 
 if [[ "$KEEP_DATA" != "--keep-data" ]]; then
   echo "ВНИМАНИЕ: Это действие удалит все компоненты Phobos:"
-  echo "  - Systemd сервисы (WireGuard, obfuscator, HTTP, Xray Remnawave)"
+  echo "  - Systemd сервисы (WireGuard, obfuscator, HTTP)"
   echo "  - Все конфигурации клиентов"
   echo "  - Ключи и сертификаты"
   echo "  - Логи и данные"
@@ -34,25 +34,24 @@ fi
 echo ""
 echo "==> Остановка и удаление systemd сервисов..."
 
-
-if systemctl is-active --quiet phobos-xray-remnawave 2>/dev/null; then
-  systemctl stop phobos-xray-remnawave
-  echo "  - phobos-xray-remnawave stopped"
+if systemctl is-active --quiet phobos-xray-upstream 2>/dev/null; then
+  systemctl stop phobos-xray-upstream
+  echo "  ✓ phobos-xray-upstream остановлен"
 fi
 
-if systemctl is-enabled --quiet phobos-xray-remnawave 2>/dev/null; then
-  systemctl disable phobos-xray-remnawave
-  echo "  - phobos-xray-remnawave disabled"
+if systemctl is-enabled --quiet phobos-xray-upstream 2>/dev/null; then
+  systemctl disable phobos-xray-upstream
+  echo "  ✓ phobos-xray-upstream отключен из автозапуска"
 fi
 
-if [[ -x "$PHOBOS_DIR/server/xray-remnawave-routing.sh" ]]; then
-  "$PHOBOS_DIR/server/xray-remnawave-routing.sh" down 2>/dev/null || true
-  echo "  - Xray TPROXY rules removed"
+if [[ -x "$PHOBOS_DIR/server/xray-upstream-fw.sh" ]]; then
+  "$PHOBOS_DIR/server/xray-upstream-fw.sh" down 2>/dev/null || true
+  echo "  ✓ TPROXY правила Xray upstream удалены"
 fi
 
-if [[ -f /etc/systemd/system/phobos-xray-remnawave.service ]]; then
-  rm /etc/systemd/system/phobos-xray-remnawave.service
-  echo "  - phobos-xray-remnawave.service removed"
+if [[ -f /etc/systemd/system/phobos-xray-upstream.service ]]; then
+  rm /etc/systemd/system/phobos-xray-upstream.service
+  echo "  ✓ phobos-xray-upstream.service удален"
 fi
 
 if systemctl is-active --quiet wg-obfuscator 2>/dev/null; then
@@ -133,6 +132,10 @@ fi
 if [[ -L /usr/local/bin/phobos ]]; then
   rm /usr/local/bin/phobos
   echo "  ✓ phobos (симлинк) удален"
+fi
+
+if [[ -f /usr/local/bin/xray ]]; then
+  echo "  - /usr/local/bin/xray оставлен на месте (может использоваться другими сервисами)"
 fi
 
 if [[ "$KEEP_DATA" == "--keep-data" ]]; then

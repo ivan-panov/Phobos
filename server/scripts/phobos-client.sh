@@ -77,13 +77,7 @@ action_add() {
   local oct4=$(echo "$client_ip_v4" | cut -d. -f4)
   local hex_part=$(printf "%x:%x" "$oct3" "$oct4")
   local client_ip_v6=""
-  if [[ -n "$server_ip_v6" ]]; then
-    client_ip_v6="${ipv6_prefix_main}::${hex_part}"
-    if [[ "${PHOBOS_VPS2_ONLY:-0}" == "1" && "${PHOBOS_VPS2_IPV6:-0}" != "1" ]]; then
-      log_warn "VPS2-only включен без IPv6-маршрута через VPS2: IPv6 для нового клиента отключен, чтобы не было утечки через VPS1."
-      client_ip_v6=""
-    fi
-  fi
+  [[ -n "$server_ip_v6" ]] && client_ip_v6="${ipv6_prefix_main}::${hex_part}"
   
   log_info "Назначен IP: $client_ip_v4 $([[ -n $client_ip_v6 ]] && echo "/ $client_ip_v6")"
   

@@ -178,9 +178,7 @@ configure_wireguard_interface() {
     uci set network.${peer_name}.route_allowed_ips='0'
 
     uci add_list network.${peer_name}.allowed_ips='0.0.0.0/0'
-    if [ "${CLIENT_IPV6}" != "none" ] && [ -n "${CLIENT_IPV6}" ]; then
-        uci add_list network.${peer_name}.allowed_ips='::/0'
-    fi
+    uci add_list network.${peer_name}.allowed_ips='::/0'
 
     uci commit network
 

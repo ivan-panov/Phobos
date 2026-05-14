@@ -21,6 +21,21 @@ action_status() {
         ((errors++))
      fi
   done
+
+  if [[ -f "$PHOBOS_DIR/server/xray-upstream.json" ]]; then
+     if systemctl is-active --quiet phobos-xray-upstream; then
+        log_success "Служба phobos-xray-upstream активна"
+     else
+        log_error "Служба phobos-xray-upstream ОСТАНОВЛЕНА"
+        ((errors++))
+     fi
+     if iptables -t mangle -S PHOBOS_XRAY >/dev/null 2>&1; then
+        log_success "TPROXY правила Xray upstream активны"
+     else
+        log_error "TPROXY правила Xray upstream не найдены"
+        ((errors++))
+     fi
+  fi
   
   # Ports
   if ss -ulpn | grep -q ":$OBFUSCATOR_PORT "; then
@@ -85,7 +100,7 @@ action_cleanup() {
 action_monitor() {
   echo "Мониторинг клиентов (Live)..."
   echo "Ctrl+C для выхода"
-  watch -n 2 "wg show wg0; echo ''; echo '--- Connections ---'; ss -un state established '( dport = :$OBFUSCATOR_PORT )'"
+  watch -n 2 "wg show wg0; echo ''; echo '--- Obfuscator ---'; ss -un state established '( dport = :$OBFUSCATOR_PORT )'; echo ''; echo '--- Xray Upstream ---'; systemctl is-active phobos-xray-upstream 2>/dev/null || true; iptables -t mangle -S PHOBOS_XRAY 2>/dev/null | head"
 }
 
 case "$CMD" in
