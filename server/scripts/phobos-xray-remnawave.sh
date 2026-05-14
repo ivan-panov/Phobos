@@ -224,6 +224,16 @@ save_supported_subscription_body() {
 fetch_subscription() {
   local sub_url="$1"
   local out_file="$2"
+
+  # Direct share links are useful when Remnawave returns base64/plain
+  # subscription data but the operator wants to pin one exact node.
+  # IMPORTANT: quote the link in the shell, because vless://... contains & and #.
+  if [[ "$sub_url" =~ ^(vless|vmess|trojan|ss):// ]]; then
+    printf '%s\n' "$sub_url" > "$out_file"
+    log_ok "Using direct Xray share link"
+    return 0
+  fi
+
   local tmp meta json_url tmp_json meta_json
   tmp=$(mktemp)
   meta=$(mktemp)
@@ -266,7 +276,32 @@ share_uri_to_xray_json() {
   local source_file="$1"
   local tag="$2"
   local first_uri
-  first_uri=$(grep -Eo '(vless|vmess|trojan|ss)://[^[:space:]]+' "$source_file" | head -n 1 || true)
+  first_uri=$(python3 - "$source_file" "$tag" <<'PYURI'
+import re
+import sys
+import urllib.parse
+
+path = sys.argv[1]
+preferred = (sys.argv[2] or '').strip().lower()
+text = open(path, 'r', encoding='utf-8', errors='ignore').read()
+uris = [x.strip() for x in re.findall(r'(?:vless|vmess|trojan|ss)://[^\s]+', text)]
+
+def display_name(uri):
+    try:
+        return urllib.parse.unquote(urllib.parse.urlparse(uri).fragment or '').lower()
+    except Exception:
+        return ''
+
+if preferred:
+    for uri in uris:
+        if preferred in display_name(uri):
+            print(uri)
+            raise SystemExit(0)
+
+if uris:
+    print(uris[0])
+PYURI
+)
   [[ -n "$first_uri" ]] || die "No supported share URI found in subscription"
 
   python3 - "$first_uri" "$tag" <<'PYCONVERT'
@@ -530,10 +565,20 @@ normalize_xray_config() {
     | .inbounds = ([.inbounds[]? | select(((.tag // "") != "phobos-tproxy") and ((.tag // "") != "phobos-socks-test"))] | [$inbound, $socks_inbound] + .)
     | .routing = (.routing // {})
     | .routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")
-    | .routing.rules = ([
-        {"type": "field", "inboundTag": ["phobos-socks-test"], "outboundTag": $proxy_tag},
-        {"type": "field", "inboundTag": ["phobos-tproxy"], "outboundTag": $proxy_tag}
-      ] + ((.routing.rules // []) | map(select((((.inboundTag // []) | tostring | contains("phobos-tproxy")) or (((.inboundTag // []) | tostring | contains("phobos-socks-test"))) | not))))
+    | .routing.rules = (
+        [
+          {"type": "field", "inboundTag": ["phobos-socks-test"], "outboundTag": $proxy_tag},
+          {"type": "field", "inboundTag": ["phobos-tproxy"], "outboundTag": $proxy_tag}
+        ]
+        +
+        ((.routing.rules // []) | map(
+          select(
+            (((.inboundTag // []) | tostring | contains("phobos-tproxy")) | not)
+            and
+            (((.inboundTag // []) | tostring | contains("phobos-socks-test")) | not)
+          )
+        ))
+      )
   ' "$tagged" > "$XRAY_CONFIG"
 
   chmod 600 "$XRAY_CONFIG"
@@ -832,7 +877,7 @@ test_connection() {
 usage() {
   cat <<EOF
 Usage:
-  $0 configure <remnawave_subscription_url> [outbound_tag]
+  $0 configure <remnawave_subscription_url_or_direct_share_link> [outbound_tag]
   $0 refresh
   $0 enable
   $0 disable
@@ -843,6 +888,10 @@ Usage:
 Environment overrides for configure:
   TPROXY_PORT=$DEFAULT_TPROXY_PORT SOCKS_TEST_PORT=$DEFAULT_SOCKS_PORT TPROXY_MARK=$DEFAULT_MARK TPROXY_TABLE=$DEFAULT_TABLE WG_IFACE=$DEFAULT_WG_IFACE
   REMNAWAVE_USER_AGENT=$DEFAULT_REMNAWAVE_UA REMNAWAVE_HWID=<stable-device-id>
+
+Examples:
+  $0 configure 'https://sub.example.com/<shortUuid>/json' vps2-remnawave
+  $0 configure 'vless://uuid@example.com:443?...#Node' Finland
 EOF
 }
 

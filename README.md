@@ -183,3 +183,12 @@ See the [LICENSE](./LICENSE) file for full terms.
 ## Поддержка
 
 **Угостить автора чашечкой какао можно на** [Boosty](https://boosty.to/ground_zerro) ❤️
+
+
+### Remnawave direct node link fallback
+
+If the subscription URL returns share links and you want to pin a single node, you can configure Phobos with one direct `vless://`, `vmess://`, `trojan://`, or `ss://` share link instead of the subscription URL. Always quote the link because it contains `&` and `#` characters.
+
+```bash
+sudo /opt/Phobos/repo/server/scripts/phobos-xray-remnawave.sh configure 'vless://uuid@example.com:443?...#Node' Finland
+```
