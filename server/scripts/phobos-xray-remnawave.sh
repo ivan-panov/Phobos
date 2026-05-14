@@ -17,6 +17,9 @@ DEFAULT_MARK="1"
 DEFAULT_TABLE="100"
 DEFAULT_WG_IFACE="wg0"
 DEFAULT_OUTBOUND_TAG="vps2-remnawave"
+DEFAULT_REMNAWAVE_UA="v2rayNG/1.10.5"
+DEFAULT_DEVICE_OS="Linux"
+DEFAULT_DEVICE_MODEL="Phobos-VPS1"
 
 log_info() { echo "[INFO] $*"; }
 log_ok() { echo "[OK] $*"; }
@@ -91,55 +94,178 @@ install_xray() {
   log_ok "Xray installed"
 }
 
-fetch_subscription() {
-  local sub_url="$1"
-  local out_file="$2"
-  local tmp
-  tmp=$(mktemp)
+json_variant_url() {
+  local url="$1"
+  python3 - "$url" <<'PYURL'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+u = urlsplit(sys.argv[1])
+path = u.path.rstrip('/')
+if not path.endswith('/json'):
+    path = path + '/json'
+print(urlunsplit((u.scheme, u.netloc, path, u.query, u.fragment)))
+PYURL
+}
 
-  log_info "Fetching Remnawave subscription"
-  if ! curl -fsSL \
-      -H 'User-Agent: v2rayN/7 Phobos-Xray-Remnawave' \
-      -H 'Accept: application/json,text/plain,*/*' \
-      "$sub_url" -o "$tmp"; then
-    rm -f "$tmp"
-    die "Failed to fetch subscription URL"
+machine_hwid() {
+  if [[ -n "${REMNAWAVE_HWID:-}" ]]; then
+    printf '%s\n' "$REMNAWAVE_HWID"
+    return 0
+  fi
+  if [[ -n "${PHOBOS_REMNAWAVE_HWID:-}" ]]; then
+    printf '%s\n' "$PHOBOS_REMNAWAVE_HWID"
+    return 0
+  fi
+  if [[ -r /etc/machine-id ]]; then
+    printf 'phobos-vps1-%s\n' "$(sha256sum /etc/machine-id | awk '{print substr($1,1,24)}')"
+    return 0
+  fi
+  printf 'phobos-vps1-%s\n' "$(hostname | sha256sum | awk '{print substr($1,1,24)}')"
+}
+
+curl_subscription_once() {
+  local url="$1"
+  local body_file="$2"
+  local meta_file="$3"
+  local header_file
+  header_file=$(mktemp)
+
+  local ua="${REMNAWAVE_USER_AGENT:-$DEFAULT_REMNAWAVE_UA}"
+  local hwid
+  hwid="$(machine_hwid)"
+
+  local code
+  set +e
+  code=$(curl -sSL \
+    --connect-timeout "${REMNAWAVE_CONNECT_TIMEOUT:-15}" \
+    --max-time "${REMNAWAVE_MAX_TIME:-60}" \
+    -D "$header_file" \
+    -o "$body_file" \
+    -w '%{http_code}' \
+    -H "User-Agent: ${ua}" \
+    -H 'Accept: application/json,text/plain,*/*' \
+    -H "x-hwid: ${hwid}" \
+    -H "x-device-os: ${REMNAWAVE_DEVICE_OS:-$DEFAULT_DEVICE_OS}" \
+    -H "x-device-model: ${REMNAWAVE_DEVICE_MODEL:-$DEFAULT_DEVICE_MODEL}" \
+    "$url")
+  local rc=$?
+  set -e
+
+  local ctype=""
+  ctype=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "$header_file" | tr -d '\r' || true)
+  local hwid_problem=""
+  hwid_problem=$(awk 'BEGIN{IGNORECASE=1} /^x-hwid-not-supported:/ || /^x-hwid-limit:/ || /^x-hwid-active:/ {print}' "$header_file" | tr -d '\r' | paste -sd '; ' - || true)
+  {
+    printf 'rc=%s\n' "$rc"
+    printf 'http_code=%s\n' "${code:-000}"
+    printf 'content_type=%s\n' "$ctype"
+    printf 'hwid_headers=%s\n' "$hwid_problem"
+    printf 'user_agent=%s\n' "$ua"
+  } > "$meta_file"
+  rm -f "$header_file"
+
+  [[ "$rc" -eq 0 && "${code:-000}" =~ ^2[0-9][0-9]$ ]]
+}
+
+subscription_body_supported() {
+  local in_file="$1"
+  local decoded
+
+  [[ -s "$in_file" ]] || return 1
+
+  if jq . "$in_file" >/dev/null 2>&1; then
+    return 0
   fi
 
-  if jq . "$tmp" >/dev/null 2>&1; then
-    cp "$tmp" "$out_file"
-    rm -f "$tmp"
+  decoded=$(mktemp)
+  if base64 -d "$in_file" > "$decoded" 2>/dev/null; then
+    if grep -Eq '(vless|vmess|trojan|ss)://' "$decoded"; then
+      rm -f "$decoded"
+      return 0
+    fi
+  fi
+  rm -f "$decoded"
+
+  grep -Eq '(vless|vmess|trojan|ss)://' "$in_file"
+}
+
+save_supported_subscription_body() {
+  local in_file="$1"
+  local out_file="$2"
+  local decoded
+
+  if jq . "$in_file" >/dev/null 2>&1; then
+    cp "$in_file" "$out_file"
     log_ok "Subscription returned Xray JSON"
     return 0
   fi
 
-  local decoded
   decoded=$(mktemp)
-  if base64 -d "$tmp" > "$decoded" 2>/dev/null; then
-    if grep -Eq '(vless|vmess|trojan)://' "$decoded"; then
+  if base64 -d "$in_file" > "$decoded" 2>/dev/null; then
+    if grep -Eq '(vless|vmess|trojan|ss)://' "$decoded"; then
       cp "$decoded" "$out_file"
-      rm -f "$tmp" "$decoded"
+      rm -f "$decoded"
       log_ok "Subscription returned base64 share links"
       return 0
     fi
   fi
+  rm -f "$decoded"
 
-  if grep -Eq '(vless|vmess|trojan)://' "$tmp"; then
-    cp "$tmp" "$out_file"
-    rm -f "$tmp" "$decoded"
+  if grep -Eq '(vless|vmess|trojan|ss)://' "$in_file"; then
+    cp "$in_file" "$out_file"
     log_ok "Subscription returned plain share links"
     return 0
   fi
 
-  rm -f "$tmp" "$decoded"
-  die "Subscription is neither valid Xray JSON nor supported share links. Use the Remnawave Xray JSON subscription URL, often the /json variant."
+  return 1
+}
+
+fetch_subscription() {
+  local sub_url="$1"
+  local out_file="$2"
+  local tmp meta json_url tmp_json meta_json
+  tmp=$(mktemp)
+  meta=$(mktemp)
+  tmp_json=$(mktemp)
+  meta_json=$(mktemp)
+
+  log_info "Fetching Remnawave subscription"
+  if curl_subscription_once "$sub_url" "$tmp" "$meta" && subscription_body_supported "$tmp"; then
+    save_supported_subscription_body "$tmp" "$out_file"
+    rm -f "$tmp" "$meta" "$tmp_json" "$meta_json"
+    return 0
+  fi
+
+  json_url="$(json_variant_url "$sub_url")"
+  if [[ "$json_url" != "$sub_url" ]]; then
+    log_warn "Bare URL did not return usable Xray data; retrying explicit /json subscription endpoint"
+    if curl_subscription_once "$json_url" "$tmp_json" "$meta_json" && subscription_body_supported "$tmp_json"; then
+      save_supported_subscription_body "$tmp_json" "$out_file"
+      rm -f "$tmp" "$meta" "$tmp_json" "$meta_json"
+      return 0
+    fi
+  fi
+
+  log_err "Remnawave subscription fetch failed or returned unsupported content."
+  log_err "First attempt: $(tr '\n' ' ' < "$meta")"
+  if [[ "$json_url" != "$sub_url" ]]; then
+    log_err "JSON attempt: $(tr '\n' ' ' < "$meta_json")"
+  fi
+  if grep -qiE '<html|<!doctype html' "$tmp" "$tmp_json" 2>/dev/null; then
+    log_err "The endpoint returned HTML. Use the user's subscription URL, not the browser landing/admin URL, or force /json."
+  fi
+  if grep -qi 'x-hwid-not-supported' "$meta" "$meta_json" 2>/dev/null; then
+    log_err "The panel likely has HWID enabled. Set REMNAWAVE_HWID=<stable-id> and run configure again."
+  fi
+  rm -f "$tmp" "$meta" "$tmp_json" "$meta_json"
+  die "Use a Remnawave user subscription URL like https://sub.example.com/<shortUuid> or https://sub.example.com/<shortUuid>/json."
 }
 
 share_uri_to_xray_json() {
   local source_file="$1"
   local tag="$2"
   local first_uri
-  first_uri=$(grep -Eo '(vless|vmess|trojan)://[^[:space:]]+' "$source_file" | head -n 1 || true)
+  first_uri=$(grep -Eo '(vless|vmess|trojan|ss)://[^[:space:]]+' "$source_file" | head -n 1 || true)
   [[ -n "$first_uri" ]] || die "No supported share URI found in subscription"
 
   python3 - "$first_uri" "$tag" <<'PYCONVERT'
@@ -269,6 +395,39 @@ else:
             'settings': {'servers': [{'address': u.hostname, 'port': int(u.port or 443), 'password': urllib.parse.unquote(u.username or '')}]},
             'streamSettings': stream
         }
+    elif u.scheme == 'ss':
+        # SIP002: ss://base64(method:password)@host:port or ss://base64(method:password@host:port)
+        raw = uri[len('ss://'):].split('#', 1)[0]
+        raw = raw.split('?', 1)[0]
+        method = password = address = None
+        port = None
+        if '@' in raw:
+            userinfo, server = raw.rsplit('@', 1)
+            pad = '=' * (-len(userinfo) % 4)
+            decoded_userinfo = base64.urlsafe_b64decode(userinfo + pad).decode()
+            method, password = decoded_userinfo.split(':', 1)
+            if server.startswith('['):
+                address, port_s = server.rsplit(']:', 1)
+                address = address[1:]
+            else:
+                address, port_s = server.rsplit(':', 1)
+            port = int(port_s)
+        else:
+            pad = '=' * (-len(raw) % 4)
+            decoded = base64.urlsafe_b64decode(raw + pad).decode()
+            userinfo, server = decoded.rsplit('@', 1)
+            method, password = userinfo.split(':', 1)
+            if server.startswith('['):
+                address, port_s = server.rsplit(']:', 1)
+                address = address[1:]
+            else:
+                address, port_s = server.rsplit(':', 1)
+            port = int(port_s)
+        outbound = {
+            'protocol': 'shadowsocks',
+            'tag': tag,
+            'settings': {'servers': [{'address': address, 'port': port, 'method': method, 'password': password}]}
+        }
     else:
         raise SystemExit(f'Unsupported URI scheme: {u.scheme}')
 
@@ -378,6 +537,8 @@ write_env() {
     printf 'TPROXY_MARK=%q\n' "$mark"
     printf 'TPROXY_TABLE=%q\n' "$table"
     printf 'WG_IFACE=%q\n' "$wg_iface"
+    printf 'REMNAWAVE_USER_AGENT=%q\n' "${REMNAWAVE_USER_AGENT:-$DEFAULT_REMNAWAVE_UA}"
+    printf 'REMNAWAVE_HWID=%q\n' "$(machine_hwid)"
   } > "$XRAY_ENV"
   chmod 600 "$XRAY_ENV"
 }
@@ -622,6 +783,7 @@ Usage:
 
 Environment overrides for configure:
   TPROXY_PORT=$DEFAULT_TPROXY_PORT TPROXY_MARK=$DEFAULT_MARK TPROXY_TABLE=$DEFAULT_TABLE WG_IFACE=$DEFAULT_WG_IFACE
+  REMNAWAVE_USER_AGENT=$DEFAULT_REMNAWAVE_UA REMNAWAVE_HWID=<stable-device-id>
 EOF
 }
 
