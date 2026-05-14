@@ -48,7 +48,7 @@ killswitch_on() {
     ip6tables -I FORWARD 1 -i "$WG_IFACE" -j REJECT
   fi
 
-  log_success "VPS2-only kill-switch включен: ${WG_IFACE} не может выходить напрямую через ${WAN_IFACE}."
+  log_success "VPS1 leak kill-switch включен: ${WG_IFACE} не может выходить напрямую через WAN VPS1 (${WAN_IFACE}); выход только через VPS2/Xray."
 }
 
 killswitch_off() {
@@ -60,7 +60,7 @@ killswitch_off() {
   fi
 
   save_env_var PHOBOS_VPS2_ONLY 0
-  log_warn "VPS2-only kill-switch выключен. При сбое VPS2 возможен прямой выход через IP VPS1."
+  log_warn "VPS1 leak kill-switch выключен. При сбое VPS2 возможен прямой выход через IP VPS1."
 }
 
 killswitch_status() {
@@ -79,9 +79,9 @@ usage() {
   cat <<USAGE
 Использование: $0 <on|off|status>
 
-  on      Запретить клиентам Phobos прямой выход VPS1 -> WAN, оставить только путь через VPS2
+  on      Запретить клиентам Phobos прямой выход VPS1 -> WAN, оставить только путь VPS1 -> VPS2/Xray
   off     Убрать запрет прямого выхода VPS1 -> WAN
-  status  Показать активные правила kill-switch
+  status  Показать активные правила VPS1 leak kill-switch
 
 Переменные:
   WG_IFACE=wg0       WireGuard-интерфейс клиентов Phobos

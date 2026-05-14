@@ -222,9 +222,9 @@ show_system_menu() {
 show_xray_remnawave_menu() {
   while true; do
     show_header
-    echo "XRAY -> VPS2 REMNAWAVE"
+    echo "VPS1 -> VPS2 REMNAWAVE VIA XRAY"
     echo ""
-    echo "  1) Настроить через URL подписки Remnawave"
+    echo "  1) Настроить VPS1 через URL подписки Remnawave"
     echo "  2) Обновить подписку и перезапустить"
     echo "  3) Включить сервис"
     echo "  4) Отключить сервис"

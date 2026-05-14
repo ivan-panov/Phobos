@@ -42,9 +42,9 @@ enable_vps2_only_mode() {
 
   local fw_script="$SERVER_DIR/wg0-fw.sh"
   if [[ -x "$fw_script" ]]; then
-    PHOBOS_VPS2_ONLY=1 "$fw_script" killswitch-up || log_warn "Failed to apply wg0 VPS2-only kill-switch via $fw_script"
+    PHOBOS_VPS2_ONLY=1 "$fw_script" killswitch-up || log_warn "Failed to apply wg0 VPS1 leak kill-switch via $fw_script"
   else
-    log_warn "wg0 firewall helper not found: $fw_script. Re-run the Phobos installer or apply kill-switch manually."
+    log_warn "wg0 firewall helper not found: $fw_script. Re-run the Phobos installer or apply the VPS1 leak kill-switch manually."
   fi
 }
 
@@ -491,7 +491,7 @@ EOF
 write_service() {
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Phobos Xray route to VPS2 Remnawave
+Description=Phobos VPS1 Xray route to VPS2 Remnawave
 Wants=network-online.target
 After=network-online.target wg-quick@wg0.service
 
@@ -547,8 +547,8 @@ configure() {
   enable_vps2_only_mode
 
   systemctl enable --now "$SERVICE_NAME"
-  log_ok "Enabled route: Phobos WireGuard clients -> Xray -> VPS2 Remnawave"
-  log_ok "VPS2-only kill-switch enabled: VPS1 will not forward Phobos clients directly to WAN"
+  log_ok "Enabled route: Phobos WireGuard clients -> VPS1 Xray -> VPS2 Remnawave"
+  log_ok "VPS1 leak kill-switch enabled: Phobos clients cannot bypass VPS2 via VPS1 WAN"
 }
 
 refresh() {
@@ -573,7 +573,7 @@ enable_service() {
   enable_vps2_only_mode
   systemctl enable --now "$SERVICE_NAME"
   log_ok "Service enabled"
-  log_ok "VPS2-only kill-switch enabled"
+  log_ok "VPS1 leak kill-switch enabled"
 }
 
 disable_service() {
@@ -583,7 +583,7 @@ disable_service() {
     "$ROUTING_SCRIPT" down || true
   fi
   log_ok "Service disabled and routing rules removed"
-  log_warn "VPS2-only kill-switch is intentionally kept so clients cannot leak via VPS1 WAN"
+  log_warn "VPS1 leak kill-switch is intentionally kept so clients cannot leak via VPS1 WAN"
 }
 
 status() {
@@ -600,7 +600,7 @@ status() {
   echo "== tproxy rules =="
   iptables -t mangle -S PHOBOS_XRAY 2>/dev/null || echo "no PHOBOS_XRAY chain"
   echo
-  echo "== VPS2-only kill-switch =="
+  echo "== VPS1 leak kill-switch: direct wg0 -> WAN blocked =="
   iptables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv4 kill-switch rule not found"
   ip6tables -S FORWARD 2>/dev/null | grep -E "^-A FORWARD -i ${WG_IFACE:-wg0} .* -j REJECT" || echo "IPv6 kill-switch rule not found or IPv6 disabled"
 }
