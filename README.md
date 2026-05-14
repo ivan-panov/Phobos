@@ -20,7 +20,7 @@
 Запустите установку:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ivan-panov/Phobos/main/phobos-deploy.sh)" </dev/tty
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ground-Zerro/Phobos/main/phobos-deploy.sh)" </dev/tty
 ```
 
 ### 2. Установка на клиенте
@@ -155,6 +155,16 @@ sudo /opt/Phobos/phobos-uninstall.sh
 
 ### Сервер (VPS)
 Протестированно и рекомендуется к использованию на **Ubuntu 20/22/24.04**.
+
+Для **Ubuntu 24.04** скрипты рассчитаны на стандартный `iptables-nft` backend. Если upstream Xray не стартует, первым делом проверьте:
+
+```bash
+iptables -V
+journalctl -u phobos-xray-upstream -n 80 --no-pager
+/opt/Phobos/server/xray-upstream-fw.sh restart
+```
+
+В зависимостях явно ставятся `iptables`, `nftables` и `kmod`; TPROXY проверяется перед установкой постоянных правил, чтобы ошибка модулей не маскировалась под успешный запуск.
 Желательна установка на **чистый VPS** без предварительно установленных сервисов или конфигураций.
 > Совместимость с другими дистрибутивами Linux и сторонними сервисами **не проверялась**.
 
